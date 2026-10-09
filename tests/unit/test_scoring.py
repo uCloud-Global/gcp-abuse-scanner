@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from gcp_abuse_scanner.models.finding import (
     Finding,
     FindingStatus,
@@ -11,7 +13,7 @@ from gcp_abuse_scanner.models.finding import (
     Severity,
     Vector,
 )
-from gcp_abuse_scanner.scoring.engine import ScoringEngine
+from gcp_abuse_scanner.scoring.engine import ScoringEngine, load_allowlist
 
 
 def _make_finding(
@@ -103,3 +105,64 @@ class TestScoringEngine:
         summary = engine.build_executive_summary(processed, max_projects=1)
         assert summary.posture_score < 100.0
         assert summary.by_severity.critical == 5
+
+
+class TestLoadAllowlist:
+    def test_top_level_list(self, tmp_path):
+        path = tmp_path / "allowlist.yaml"
+        path.write_text("- check_id: CM-001\n  reason: r\n")
+        assert load_allowlist(path) == [{"check_id": "CM-001", "reason": "r"}]
+
+    def test_mapping_with_allowlist_key(self, tmp_path):
+        """The documented `allowlist:` format must load, not crash the scoring engine."""
+        path = tmp_path / "allowlist.yaml"
+        path.write_text("allowlist:\n  - check_id: CM-001\n    project_id: p\n")
+        assert load_allowlist(path) == [{"check_id": "CM-001", "project_id": "p"}]
+
+    def test_config_example_file_loads(self):
+        from pathlib import Path
+
+        rules = load_allowlist(Path(__file__).parents[2] / "examples" / "config.example.yaml")
+        assert [r["check_id"] for r in rules] == ["CM-001", "CM-009"]
+
+    def test_empty_file(self, tmp_path):
+        path = tmp_path / "allowlist.yaml"
+        path.write_text("")
+        assert load_allowlist(path) == []
+
+    def test_empty_allowlist_key(self, tmp_path):
+        path = tmp_path / "allowlist.yaml"
+        path.write_text("allowlist:\n")
+        assert load_allowlist(path) == []
+
+    def test_mapping_without_allowlist_key_raises(self, tmp_path):
+        path = tmp_path / "allowlist.yaml"
+        path.write_text("check_id: CM-001\n")
+        with pytest.raises(ValueError, match="'allowlist' key"):
+            load_allowlist(path)
+
+    def test_non_mapping_rule_raises(self, tmp_path):
+        path = tmp_path / "allowlist.yaml"
+        path.write_text("- CM-001\n")
+        with pytest.raises(ValueError, match="rule #1"):
+            load_allowlist(path)
+
+    def test_scalar_allowlist_raises(self, tmp_path):
+        path = tmp_path / "allowlist.yaml"
+        path.write_text("allowlist: CM-001\n")
+        with pytest.raises(ValueError, match="must be a list"):
+            load_allowlist(path)
+
+    def test_invalid_yaml_raises(self, tmp_path):
+        path = tmp_path / "allowlist.yaml"
+        path.write_text("- check_id: [unclosed\n")
+        with pytest.raises(ValueError, match="invalid YAML"):
+            load_allowlist(path)
+
+    def test_mapping_rules_suppress_findings(self, tmp_path):
+        path = tmp_path / "allowlist.yaml"
+        path.write_text("allowlist:\n  - check_id: CM-001\n    reason: accepted\n")
+        finding = _make_finding("CM-001", Severity.HIGH)
+        result = ScoringEngine(allowlist=load_allowlist(path)).process([finding])
+        assert result[0].suppressed is True
+        assert result[0].suppression_reason == "accepted"

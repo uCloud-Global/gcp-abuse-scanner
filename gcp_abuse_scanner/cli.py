@@ -26,6 +26,8 @@ import typer
 from rich.console import Console
 from rich.logging import RichHandler
 
+from gcp_abuse_scanner.models.finding import Vector
+
 app = typer.Typer(
     name="gcp-abuse-scanner",
     help=(
@@ -108,10 +110,10 @@ def scan(
         typer.Option("--output", help="Output file path (default: stdout / auto-named)."),
     ] = None,
     vector: Annotated[
-        list[str] | None,
+        list[Vector] | None,
         typer.Option(
             "--vector",
-            help="Limit scan to specific vectors: crypto_mining, gemini_abuse, common.",
+            help="Limit scan to specific vectors. Repeatable.",
         ),
     ] = None,
     allowlist_file: Annotated[
@@ -189,12 +191,29 @@ def scan(
             console.print(f"  [{meta['severity']}] {meta['check_id']} — {meta['title']}")
         raise typer.Exit(code=0)
 
-    # Load allowlist
-    allowlist: list[dict] = []
-    if allowlist_file and allowlist_file.exists():
-        import yaml
+    # Fail fast on credentials that cannot be loaded (e.g. a malformed key file),
+    # instead of letting every collector fail and producing an empty report.
+    try:
+        auth.get_credentials()
+    except Exception as exc:
+        err_console.print(f"[red]Authentication failed:[/] {exc}")
+        raise typer.Exit(code=1)
 
-        allowlist = yaml.safe_load(allowlist_file.read_text()) or []
+    # Load allowlist (validated before the slow collection phase)
+    allowlist: list[dict] = []
+    if allowlist_file:
+        if allowlist_file.exists():
+            from gcp_abuse_scanner.scoring.engine import load_allowlist
+
+            try:
+                allowlist = load_allowlist(allowlist_file)
+            except ValueError as exc:
+                err_console.print(f"[red]Invalid allowlist {allowlist_file}:[/] {exc}")
+                raise typer.Exit(code=1)
+        else:
+            err_console.print(
+                f"[yellow]Warning:[/] allowlist file {allowlist_file} not found — ignoring."
+            )
 
     # Collect inventory (with optional cache)
     console.print("[cyan]Collecting resource inventory...[/]")
@@ -213,9 +232,7 @@ def scan(
 
     # Filter by vector if specified
     if vector:
-        from gcp_abuse_scanner.models.finding import Vector as VectorEnum
-
-        allowed_vectors = {VectorEnum(v) for v in vector}
+        allowed_vectors = set(vector)
         checks = [c for c in checks if c.vector in allowed_vectors]
 
     all_findings = []
@@ -253,7 +270,7 @@ def scan(
         organization_id=org,
         project_ids=project_ids,
         service_account=auth.identity,
-        vectors_scanned=[v for v in (vector or ["crypto_mining", "gemini_abuse", "common"])],
+        vectors_scanned=[v.value for v in (vector or list(Vector))],
     )
 
     coverage = CoverageReport(
@@ -335,8 +352,8 @@ def _write_output(report: ScanReport, format: OutputFormat, output: Path | None)
 @app.command(name="list-checks")
 def list_checks(
     vector: Annotated[
-        str | None,
-        typer.Option("--vector", help="Filter by vector: crypto_mining, gemini_abuse, common."),
+        Vector | None,
+        typer.Option("--vector", help="Filter by vector."),
     ] = None,
 ) -> None:
     """List all available security checks."""
@@ -347,7 +364,7 @@ def list_checks(
 
     checks = CheckRegistry.list_metadata()
     if vector:
-        checks = [c for c in checks if c["vector"] == vector]
+        checks = [c for c in checks if c["vector"] == vector.value]
 
     table = Table(title="Available Security Checks", box=box.ROUNDED)
     table.add_column("ID", style="bold cyan", width=10)

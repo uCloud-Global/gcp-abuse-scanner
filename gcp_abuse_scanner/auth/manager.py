@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +33,10 @@ class AuthManager:
     3. Application Default Credentials (ADC).
 
     Warns when a key file is used (anti-pattern for production).
+
+    ``service_account_key`` is also bound to GOOGLE_APPLICATION_CREDENTIALS by the CLI.
+    When that variable points to a non-key credential file (user ADC, Workload Identity
+    Federation config), it is resolved through ADC instead of being parsed as a key.
     """
 
     def __init__(
@@ -67,10 +73,38 @@ class AuthManager:
             quota_project_id=self._quota_project_id,
         )
 
+    def _key_file_type(self) -> str | None:
+        """Return the ``type`` field of the credential file, or None if unreadable."""
+        try:
+            data = json.loads(Path(self._key_file).read_text())  # type: ignore[arg-type]
+        except (OSError, ValueError):
+            return None
+        return data.get("type") if isinstance(data, dict) else None
+
+    def _is_env_credential_file(self) -> bool:
+        env_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        return bool(env_path) and Path(env_path).resolve() == Path(self._key_file).resolve()  # type: ignore[arg-type]
+
     def _key_file_credentials(self) -> Credentials:
         key_path = Path(self._key_file)  # type: ignore[arg-type]
         if not key_path.exists():
             raise AuthError(f"Service account key file not found: {self._key_file}")
+
+        cred_type = self._key_file_type()
+        if cred_type != "service_account":
+            if self._is_env_credential_file():
+                # User ADC / external_account (WIF) config: google.auth.default() reads
+                # GOOGLE_APPLICATION_CREDENTIALS and supports every credential type.
+                logger.info(
+                    "GOOGLE_APPLICATION_CREDENTIALS is a '%s' credential file — using ADC",
+                    cred_type,
+                )
+                return self._adc_credentials()
+            raise AuthError(
+                f"{self._key_file} is not a service account key (type={cred_type!r}). "
+                "Pass a service account key, use --impersonate-service-account, "
+                "or point GOOGLE_APPLICATION_CREDENTIALS at this file to use it via ADC."
+            )
 
         logger.warning(
             "⚠️  Using a service account key file (%s). "
@@ -97,6 +131,8 @@ class AuthManager:
         if self._impersonate_sa:
             return f"impersonated:{self._impersonate_sa}"
         if self._key_file:
+            if self._key_file_type() not in (None, "service_account"):
+                return "adc"
             return f"key_file:{self._key_file}"
         return "adc"
 

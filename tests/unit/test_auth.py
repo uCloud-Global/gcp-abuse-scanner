@@ -282,3 +282,85 @@ class TestScopeResolverOrgMode:
 
             with pytest.raises(Exception, match="Permission denied"):
                 resolver.resolve_projects(organization_id="123456789")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AuthManager — non service-account credential files
+# ─────────────────────────────────────────────────────────────────────────────
+
+_AUTHORIZED_USER = {
+    "type": "authorized_user",
+    "client_id": "x.apps.googleusercontent.com",
+    "client_secret": "secret",
+    "refresh_token": "token",
+}
+_EXTERNAL_ACCOUNT = {
+    "type": "external_account",
+    "audience": "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/gh",
+    "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+    "token_url": "https://sts.googleapis.com/v1/token",
+    "credential_source": {"file": "/tmp/oidc-token"},
+}
+
+
+class TestAuthManagerNonKeyCredentialFiles:
+    @pytest.mark.parametrize("payload", [_AUTHORIZED_USER, _EXTERNAL_ACCOUNT])
+    def test_env_credential_file_falls_back_to_adc(self, tmp_path, monkeypatch, payload):
+        cred_file = tmp_path / "creds.json"
+        cred_file.write_text(json.dumps(payload))
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(cred_file))
+
+        auth = AuthManager(service_account_key=str(cred_file))
+        mock_creds = MagicMock()
+        with (
+            patch("google.auth.default", return_value=(mock_creds, None)) as mock_default,
+            patch(
+                "google.oauth2.service_account.Credentials.from_service_account_file"
+            ) as mock_key_loader,
+        ):
+            creds = auth.get_credentials()
+
+        assert creds is mock_creds
+        mock_default.assert_called_once()
+        mock_key_loader.assert_not_called()
+
+    def test_env_credential_file_identity_is_adc(self, tmp_path, monkeypatch):
+        cred_file = tmp_path / "creds.json"
+        cred_file.write_text(json.dumps(_AUTHORIZED_USER))
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(cred_file))
+
+        assert AuthManager(service_account_key=str(cred_file)).identity == "adc"
+
+    def test_explicit_non_key_file_raises_auth_error(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+        cred_file = tmp_path / "creds.json"
+        cred_file.write_text(json.dumps(_AUTHORIZED_USER))
+
+        auth = AuthManager(service_account_key=str(cred_file))
+        with pytest.raises(AuthError, match="not a service account key"):
+            auth.get_credentials()
+
+    def test_unparseable_file_raises_auth_error(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+        cred_file = tmp_path / "creds.json"
+        cred_file.write_text("not json")
+
+        with pytest.raises(AuthError, match="type=None"):
+            AuthManager(service_account_key=str(cred_file)).get_credentials()
+
+    def test_impersonation_ignores_env_credential_file(self, tmp_path, monkeypatch):
+        cred_file = tmp_path / "creds.json"
+        cred_file.write_text(json.dumps(_EXTERNAL_ACCOUNT))
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(cred_file))
+
+        auth = AuthManager(
+            service_account_key=str(cred_file),
+            impersonate_service_account="sa@proj.iam.gserviceaccount.com",
+        )
+        with (
+            patch("google.auth.default", return_value=(MagicMock(), None)),
+            patch("google.auth.impersonated_credentials.Credentials") as mock_imp,
+        ):
+            auth.get_credentials()
+
+        mock_imp.assert_called_once()

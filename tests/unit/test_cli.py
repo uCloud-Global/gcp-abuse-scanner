@@ -450,3 +450,134 @@ class TestScanFullPipeline:
         allowlist.write_text("- check_id: CM-001\n  project_id: proj-1\n  reason: test\n")
         result = self._run_scan_mocked(["--allowlist", str(allowlist)])
         assert result.exit_code == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# scan command — validation happens before the (slow) collection phase
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestScanFailFast:
+    def _invoke(self, extra_args, auth=None, findings=None):
+        """Run `scan --project proj-1` with real scoring; returns (result, collector_mock)."""
+        if auth is None:
+            auth = MagicMock()
+            auth.identity = "adc"
+
+        mock_scope = MagicMock()
+        mock_scope.resolve_projects.return_value = ["proj-1"]
+
+        mock_inventory = MagicMock()
+        mock_inventory.inaccessible_projects = []
+        mock_inventory.skipped_apis = {}
+        mock_inventory.collector_errors = []
+        mock_engine = MagicMock()
+        mock_engine.collect.return_value = mock_inventory
+
+        from gcp_abuse_scanner.models.finding import Vector
+
+        mock_check = MagicMock()
+        mock_check.vector = Vector.CRYPTO_MINING
+        mock_check.safe_evaluate.return_value = findings or []
+        mock_check.is_applicable.return_value = True
+
+        with (
+            patch("gcp_abuse_scanner.auth.AuthManager", return_value=auth),
+            patch("gcp_abuse_scanner.auth.ScopeResolver", return_value=mock_scope),
+            patch("gcp_abuse_scanner.collectors.engine.CollectorEngine", return_value=mock_engine),
+            patch("gcp_abuse_scanner.checks.CheckRegistry.all_checks", return_value=[mock_check]),
+        ):
+            result = runner.invoke(app, ["scan", "--project", "proj-1", *extra_args])
+        return result, mock_engine
+
+    # --vector ---------------------------------------------------------------
+
+    def test_invalid_vector_rejected_before_collection(self):
+        result, engine = self._invoke(["--vector", "crypto"])
+        assert result.exit_code == 2  # Typer usage error
+        assert not isinstance(result.exception, ValueError)
+        engine.collect.assert_not_called()
+
+    def test_valid_vectors_accepted_and_recorded(self, tmp_path):
+        out = tmp_path / "r.json"
+        result, _ = self._invoke(
+            [
+                "--vector",
+                "crypto_mining",
+                "--vector",
+                "common",
+                "--format",
+                "json",
+                "--output",
+                str(out),
+            ]
+        )
+        assert result.exit_code == 0
+        import json
+
+        assert json.loads(out.read_text())["metadata"]["vectors_scanned"] == [
+            "crypto_mining",
+            "common",
+        ]
+
+    def test_list_checks_invalid_vector_rejected(self):
+        result = runner.invoke(app, ["list-checks", "--vector", "bogus"])
+        assert result.exit_code == 2
+
+    # --allowlist ------------------------------------------------------------
+
+    def test_mapping_allowlist_suppresses_critical(self, tmp_path):
+        """`allowlist:` mapping (documented format) must work end-to-end with real scoring."""
+        allowlist = tmp_path / "allowlist.yaml"
+        allowlist.write_text("allowlist:\n  - check_id: CM-001\n    reason: accepted\n")
+        findings = _make_mock_report(has_critical=True).findings
+
+        result, _ = self._invoke(["--allowlist", str(allowlist)], findings=findings)
+
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert result.exit_code == 0  # the only CRITICAL is suppressed
+
+    def test_unsuppressed_critical_still_exits_two(self, tmp_path):
+        allowlist = tmp_path / "allowlist.yaml"
+        allowlist.write_text("allowlist:\n  - check_id: GEM-001\n    reason: other check\n")
+        findings = _make_mock_report(has_critical=True).findings
+
+        result, _ = self._invoke(["--allowlist", str(allowlist)], findings=findings)
+        assert result.exit_code == 2
+
+    def test_malformed_allowlist_fails_before_collection(self, tmp_path):
+        allowlist = tmp_path / "allowlist.yaml"
+        allowlist.write_text("check_id: CM-001\n")
+
+        result, engine = self._invoke(["--allowlist", str(allowlist)])
+
+        assert result.exit_code == 1
+        assert "Invalid allowlist" in result.output
+        engine.collect.assert_not_called()
+
+    def test_missing_allowlist_warns(self):
+        result, _ = self._invoke(["--allowlist", "/nonexistent/allowlist.yaml"])
+        assert result.exit_code == 0
+        assert "not found" in result.output
+
+    # credentials ------------------------------------------------------------
+
+    def test_credential_error_fails_before_collection(self):
+        from gcp_abuse_scanner.auth import AuthError
+
+        auth = MagicMock()
+        auth.get_credentials.side_effect = AuthError("not a service account key")
+
+        result, engine = self._invoke([], auth=auth)
+
+        assert result.exit_code == 1
+        assert "Authentication failed" in result.output
+        engine.collect.assert_not_called()
+
+    def test_dry_run_does_not_resolve_credentials(self):
+        auth = MagicMock()
+        auth.get_credentials.side_effect = AssertionError("must not be called")
+
+        result, _ = self._invoke(["--dry-run"], auth=auth)
+
+        assert result.exit_code == 0

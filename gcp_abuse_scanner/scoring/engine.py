@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from gcp_abuse_scanner.models.finding import Finding, Severity
@@ -38,6 +39,36 @@ _BLAST_RADIUS_WEIGHT: dict[str, float] = {
     "project": 1.0,
     "resource": 0.8,
 }
+
+
+def load_allowlist(path: Path) -> list[dict[str, Any]]:
+    """
+    Parse an allowlist YAML file into a list of suppression rules.
+
+    Accepts either a top-level list of rules or a mapping with an ``allowlist`` key
+    (the format used in docs/allowlist.md). Raises ValueError on any other shape so
+    the CLI can fail before collecting inventory.
+    """
+    import yaml
+
+    try:
+        data = yaml.safe_load(path.read_text())
+    except yaml.YAMLError as exc:
+        raise ValueError(f"invalid YAML: {exc}") from exc
+
+    if data is None:
+        return []
+    if isinstance(data, dict):
+        if "allowlist" not in data:
+            raise ValueError("expected a list of rules or a mapping with an 'allowlist' key")
+        data = data["allowlist"] or []
+    if not isinstance(data, list):
+        raise ValueError(f"'allowlist' must be a list of rules, got {type(data).__name__}")
+
+    for i, rule in enumerate(data, start=1):
+        if not isinstance(rule, dict):
+            raise ValueError(f"rule #{i} must be a mapping, got {type(rule).__name__}: {rule!r}")
+    return data
 
 
 class ScoringEngine:

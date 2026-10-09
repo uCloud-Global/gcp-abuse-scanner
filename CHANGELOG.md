@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `AGENTS.md` and `skills/` — guidance and helper scripts for AI agents using the CLI.
+
+### Fixed
+- **Documented allowlist format crashed the scan**: an allowlist using the `allowlist:` key (as in `docs/allowlist.md` and `examples/config.example.yaml`) raised `AttributeError` in the scoring engine after the full collection phase. Both a top-level list and the `allowlist:` mapping are now accepted via `load_allowlist()`, and malformed files are rejected before collection (exit 1). A missing allowlist file now prints a warning instead of being silently ignored.
+- **Non-key files in `GOOGLE_APPLICATION_CREDENTIALS` broke every collector**: the variable is bound to `--service-account-key`, so user ADC (`authorized_user`) or Workload Identity Federation (`external_account`) configs were parsed as SA keys and every collector failed, producing an empty report with exit 0. Such files are now resolved through ADC; a non-key file passed explicitly raises a clear `AuthError`. Credentials are now resolved before collection, so auth failures abort with exit 1.
+- **Invalid `--vector` crashed after collection**: `--vector` (on `scan` and `list-checks`) is now an enum validated by Typer before any work (usage error, exit 2).
+
 ## [0.1.4] - 2026-07-17
 
 ### Added
