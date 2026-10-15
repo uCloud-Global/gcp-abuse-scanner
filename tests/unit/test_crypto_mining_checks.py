@@ -10,6 +10,7 @@ import pytest
 from gcp_abuse_scanner.checks.crypto_mining.cm_compute import (
     CM001ExternalIP,
     CM004FirewallAdminPortsOpen,
+    CM008FirewallDatabasePortsOpen,
     CM009ShieldedVMDisabled,
 )
 from gcp_abuse_scanner.checks.crypto_mining.cm_iam import (
@@ -77,6 +78,83 @@ class TestCM004FirewallAdminPorts:
         check = CM004FirewallAdminPortsOpen()
         findings = check.evaluate(crypto_inventory)
         assert findings == []
+
+
+# --- CM-008 ---
+
+
+def _firewall_rule(
+    name: str = "allow-db-from-internet",
+    source_ranges: list[str] | None = None,
+    allowed: list[dict] | None = None,
+    direction: str = "INGRESS",
+    disabled: bool = False,
+):
+    from gcp_abuse_scanner.models.inventory import FirewallRule
+
+    return FirewallRule(
+        name=name,
+        project_id="test-project-001",
+        network="default",
+        direction=direction,
+        source_ranges=source_ranges if source_ranges is not None else ["0.0.0.0/0"],
+        allowed=allowed if allowed is not None else [{"IPProtocol": "tcp", "ports": ["3306"]}],
+        disabled=disabled,
+    )
+
+
+class TestCM008FirewallDatabasePorts:
+    def test_fail_when_mysql_open_to_internet(self, clean_inventory: ResourceInventory) -> None:
+        clean_inventory.firewall_rules.append(_firewall_rule())
+        findings = CM008FirewallDatabasePortsOpen().evaluate(clean_inventory)
+        assert len(findings) == 1
+        assert findings[0].check_id == "CM-008"
+        assert findings[0].severity == Severity.CRITICAL
+        assert findings[0].evidence["exposed_ports"] == ["3306"]
+
+    def test_fail_when_postgres_open_to_internet(self, clean_inventory: ResourceInventory) -> None:
+        clean_inventory.firewall_rules.append(
+            _firewall_rule(allowed=[{"IPProtocol": "tcp", "ports": ["5432"]}])
+        )
+        findings = CM008FirewallDatabasePortsOpen().evaluate(clean_inventory)
+        assert len(findings) == 1
+        assert findings[0].evidence["exposed_ports"] == ["5432"]
+
+    def test_fail_when_all_ports_open(self, clean_inventory: ResourceInventory) -> None:
+        clean_inventory.firewall_rules.append(_firewall_rule(allowed=[{"IPProtocol": "all"}]))
+        findings = CM008FirewallDatabasePortsOpen().evaluate(clean_inventory)
+        assert len(findings) == 1
+        assert sorted(findings[0].evidence["exposed_ports"]) == ["3306", "5432"]
+
+    def test_pass_when_source_range_restricted(self, clean_inventory: ResourceInventory) -> None:
+        clean_inventory.firewall_rules.append(
+            _firewall_rule(source_ranges=["10.0.0.0/8", "192.168.1.0/24"])
+        )
+        findings = CM008FirewallDatabasePortsOpen().evaluate(clean_inventory)
+        assert findings == []
+
+    def test_pass_when_ports_are_not_database_ports(
+        self, clean_inventory: ResourceInventory
+    ) -> None:
+        clean_inventory.firewall_rules.append(
+            _firewall_rule(allowed=[{"IPProtocol": "tcp", "ports": ["443", "8080"]}])
+        )
+        findings = CM008FirewallDatabasePortsOpen().evaluate(clean_inventory)
+        assert findings == []
+
+    def test_pass_when_rule_is_egress_or_disabled(self, clean_inventory: ResourceInventory) -> None:
+        clean_inventory.firewall_rules.append(_firewall_rule(direction="EGRESS"))
+        clean_inventory.firewall_rules.append(_firewall_rule(name="disabled-rule", disabled=True))
+        findings = CM008FirewallDatabasePortsOpen().evaluate(clean_inventory)
+        assert findings == []
+
+    def test_remediation_has_commands_and_iac(self, clean_inventory: ResourceInventory) -> None:
+        clean_inventory.firewall_rules.append(_firewall_rule())
+        finding = CM008FirewallDatabasePortsOpen().evaluate(clean_inventory)[0]
+        assert finding.remediation.summary
+        assert finding.remediation.steps
+        assert finding.remediation.gcloud_commands
+        assert finding.remediation.iac_reference
 
 
 # --- CM-009 ---

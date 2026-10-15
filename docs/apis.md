@@ -55,11 +55,12 @@ These must be enabled in every project you want to scan. If an API is disabled i
 | GCP API | Enable Command | Used By | Checks Enabled | Notes |
 |---|---|---|---|---|
 | `serviceusage.googleapis.com` | `gcloud services enable serviceusage.googleapis.com` | `ServiceUsageCollector`, `QuotaCollector` | All checks (gates all other collectors) | **Must be enabled first.** The scanner uses this to discover which other APIs are active in the project. |
-| `iam.googleapis.com` | `gcloud services enable iam.googleapis.com` | `IAMCollector` | CM-040 through CM-044, CMN-004, CMN-006, GEM-020 through GEM-023 | Lists service accounts and their keys |
+| `iam.googleapis.com` | `gcloud services enable iam.googleapis.com` | `IAMCollector` | CM-040 through CM-046, CMN-004, CMN-006, GEM-020 through GEM-023 | Lists service accounts and their keys |
 | `compute.googleapis.com` | `gcloud services enable compute.googleapis.com` | `ComputeCollector`, `NetworkCollector` | CM-001, CM-003 through CM-009, CM-050, CMN-003 | VM instances, firewall rules, VPC networks |
 | `container.googleapis.com` | `gcloud services enable container.googleapis.com` | `GKECollector` | CM-020 through CM-026 | GKE clusters and node pools |
 | `run.googleapis.com` | `gcloud services enable run.googleapis.com` | `CloudRunCollector` | CM-030, CM-031 | Cloud Run services and their IAM bindings |
 | `aiplatform.googleapis.com` | `gcloud services enable aiplatform.googleapis.com` | `VertexAICollector` | GEM-030, GEM-040, GEM-011 | Vertex AI endpoints and their network config |
+| `generativelanguage.googleapis.com` | `gcloud services enable generativelanguage.googleapis.com` | `QuotaCollector` | GEM-010, GEM-041 | Gemini API quota limits (the surface API keys call) |
 | `apikeys.googleapis.com` | `gcloud services enable apikeys.googleapis.com` | `APIKeysCollector` | GEM-001 through GEM-006 | API keys and their restrictions. **Note:** API keys can exist in a project even if this API is not enabled — the scanner always attempts collection and handles 403 gracefully. |
 | `recommender.googleapis.com` | `gcloud services enable recommender.googleapis.com` | `RecommenderCollector` | CM-045 | IAM recommender insights for over-privileged service accounts |
 
@@ -132,7 +133,7 @@ These APIs are **not called by the scanner itself** — instead, the scanner che
 serviceusage.googleapis.com
   └── ServiceUsageCollector
         └── (gates all other collectors)
-              └── QuotaCollector → GEM-040
+              └── QuotaCollector → GEM-040 (Vertex AI), GEM-041 (Gemini API)
 
 cloudasset.googleapis.com + iam.googleapis.com
   └── IAMCollector
@@ -141,6 +142,7 @@ cloudasset.googleapis.com + iam.googleapis.com
         ├── CM-042  Broad actAs roles
         ├── CM-043  Public IAM binding (allUsers/allAuthenticatedUsers)
         ├── CM-044  Default Compute SA with Editor role
+        ├── CM-046  Personal (consumer email) account with Owner/Editor
         ├── CMN-004 Default Compute SA with active keys
         ├── CMN-006 Audit logs disabled
         ├── GEM-020 Broad Vertex AI IAM
@@ -159,6 +161,7 @@ compute.googleapis.com
   └── NetworkCollector
         ├── CM-003  Unrestricted egress firewall
         ├── CM-004  Admin port (SSH/RDP) open to 0.0.0.0/0
+        ├── CM-008  Database port (MySQL/PostgreSQL) open to 0.0.0.0/0
         └── CM-050  VPC with no egress deny-all rule
 
 container.googleapis.com
@@ -216,7 +219,7 @@ You can run the scanner with a subset of APIs enabled. Here is what you get at e
 ### Minimum (IAM + Billing only)
 Enable: `cloudasset.googleapis.com`, `iam.googleapis.com`, `cloudbilling.googleapis.com`, `billingbudgets.googleapis.com`, `orgpolicy.googleapis.com`, `serviceusage.googleapis.com`
 
-Checks active: CM-040 through CM-044, CM-060, CMN-001 through CMN-006, GEM-020 through GEM-023, GEM-050, GEM-051
+Checks active: CM-040 through CM-046, CM-060, CMN-001 through CMN-006, GEM-020 through GEM-023, GEM-050, GEM-051
 
 ### Recommended (adds Compute + GKE + Cloud Run)
 Adds: `compute.googleapis.com`, `container.googleapis.com`, `run.googleapis.com`

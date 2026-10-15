@@ -4,6 +4,7 @@ Crypto Mining checks — Compute Engine.
 CM-001: VMs with external IP
 CM-004: Firewall ingress open on admin ports from 0.0.0.0/0
 CM-006: Project metadata with serial-port-enable or OS Login disabled
+CM-008: Firewall ingress open on database ports (MySQL 3306, PostgreSQL 5432) from 0.0.0.0/0
 CM-009: Shielded VM not enabled
 """
 
@@ -24,6 +25,7 @@ from gcp_abuse_scanner.models.finding import (
 from gcp_abuse_scanner.models.inventory import ComputeInstance, ResourceInventory
 
 _ADMIN_PORTS = {"22", "3389", "5985", "5986"}
+_DB_PORTS = {"3306", "5432"}  # MySQL, PostgreSQL
 
 
 def _make_id(check_id: str, project_id: str, resource: str) -> str:
@@ -215,6 +217,108 @@ class CM004FirewallAdminPortsOpen(BaseCheck):
                 else:
                     for p in ports:
                         if str(p) in _ADMIN_PORTS:
+                            exposed.append(str(p))
+        return list(set(exposed))
+
+
+@CheckRegistry.register
+class CM008FirewallDatabasePortsOpen(BaseCheck):
+    """Firewall ingress rule allows database access (MySQL/PostgreSQL) from 0.0.0.0/0."""
+
+    check_id = "CM-008"
+    title = "Firewall rule allows database port access from the internet (0.0.0.0/0)"
+    vector = Vector.CRYPTO_MINING
+    severity_base = Severity.CRITICAL
+    required_collectors = ["network"]
+    references = ["CIS GCP 3.6"]
+    tags = ["network", "firewall", "database", "crypto_mining"]
+
+    def evaluate(self, inventory: ResourceInventory) -> list[Finding]:
+        findings: list[Finding] = []
+        for rule in inventory.firewall_rules:
+            if rule.direction != "INGRESS" or rule.disabled:
+                continue
+            if not CM004FirewallAdminPortsOpen._is_open_to_internet(rule):
+                continue
+            exposed_ports = self._exposed_db_ports(rule)
+            if not exposed_ports:
+                continue
+
+            findings.append(
+                Finding(
+                    finding_id=_make_id(self.check_id, rule.project_id, rule.name),
+                    check_id=self.check_id,
+                    vector=self.vector,
+                    title=self.title,
+                    severity=self.severity_base,
+                    status=FindingStatus.FAIL,
+                    exploitability_score=9.2,
+                    blast_radius="project",
+                    resource=GCPResource(
+                        resource_type="compute.googleapis.com/Firewall",
+                        resource_id=rule.name,
+                        project_id=rule.project_id,
+                    ),
+                    evidence={
+                        "rule_name": rule.name,
+                        "network": rule.network,
+                        "source_ranges": rule.source_ranges,
+                        "exposed_ports": exposed_ports,
+                        "allowed": rule.allowed,
+                    },
+                    description=(
+                        f"Firewall rule '{rule.name}' allows inbound traffic on database "
+                        f"port(s) {exposed_ports} from 0.0.0.0/0 (any source). Internet-facing "
+                        "databases are brute-forced, scanned, and exploited continuously; "
+                        "compromised data or compute resources can be abused for crypto "
+                        "mining or data exfiltration."
+                    ),
+                    impact=(
+                        "Direct internet access to MySQL/PostgreSQL enables credential "
+                        "brute-force, exploitation of unpatched database engines, and full "
+                        "data exfiltration or VM compromise leading to crypto mining."
+                    ),
+                    remediation=Remediation(
+                        summary=(
+                            "Restrict database access to specific trusted IP ranges, or "
+                            "remove public access entirely and use private IP / Cloud SQL "
+                            "Auth Proxy."
+                        ),
+                        steps=[
+                            "Identify the legitimate clients that need database access.",
+                            "Replace 0.0.0.0/0 source range with specific IP ranges or VPC CIDR.",
+                            "For Cloud SQL, disable public IP and use Private IP or the Auth Proxy.",
+                            "Consider VPC Service Controls and private services access.",
+                        ],
+                        gcloud_commands=[
+                            f"gcloud compute firewall-rules update {rule.name} --source-ranges=TRUSTED_IP_RANGE",
+                            "# Cloud SQL: disable public IP\n"
+                            "gcloud sql instances patch INSTANCE_NAME --no-assign-ip",
+                        ],
+                        iac_reference="google_compute_firewall.source_ranges",
+                        docs=[
+                            "https://cloud.google.com/sql/docs/mysql/configure-private-ip",
+                            "https://cloud.google.com/sql/docs/postgres/connect-auth-proxy",
+                        ],
+                        effort=RemediationEffort.LOW,
+                    ),
+                    references=self.references,
+                )
+            )
+        return findings
+
+    @staticmethod
+    def _exposed_db_ports(rule: object) -> list[str]:
+        exposed = []
+        for allow in getattr(rule, "allowed", []):
+            ports = allow.get("ports", [])
+            proto = allow.get("IPProtocol", "")
+            if proto in ("tcp", "all"):
+                if not ports:  # all ports
+                    exposed.extend(list(_DB_PORTS))
+                else:
+                    for p in ports:
+                        if str(p) in _DB_PORTS:
                             exposed.append(str(p))
         return list(set(exposed))
 

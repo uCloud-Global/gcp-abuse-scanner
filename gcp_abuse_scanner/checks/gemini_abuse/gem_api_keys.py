@@ -27,6 +27,8 @@ _GEMINI_APIS = {
     "generativelanguage.googleapis.com",
     "aiplatform.googleapis.com",
 }
+
+
 def _make_id(check_id: str, project_id: str, key_name: str) -> str:
     h = hashlib.md5(key_name.encode(), usedforsecurity=False).hexdigest()[:8]
     return f"{check_id}-{project_id}-{h}"

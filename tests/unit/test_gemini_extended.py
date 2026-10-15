@@ -22,6 +22,7 @@ from gcp_abuse_scanner.checks.gemini_abuse.gem_extended import (
     GEM023BroadVertexPredictAccess,
     GEM030VertexEndpointNoPrivateNetwork,
     GEM040VertexAIQuotaAtDefault,
+    GEM041GeminiAPIQuotaAtDefault,
     GEM050NoAPIKeyCreationRestriction,
     GEM051NoBudgetForVertexAI,
 )
@@ -481,7 +482,9 @@ class TestGEM040VertexAIQuotaAtDefault:
         assert len(findings) == 1
         assert findings[0].check_id == "GEM-040"
         assert findings[0].status == FindingStatus.FAIL
-        assert findings[0].evidence["effective_limit"] == 600
+        assert findings[0].evidence["metrics_at_default"] == 1
+        assert findings[0].evidence["limit_entries_at_default"] == 1
+        assert findings[0].evidence["min_effective_limit"] == 60
 
     def test_pass_when_quota_reduced(self, empty_inventory: ResourceInventory) -> None:
         empty_inventory.quota_info.append(
@@ -501,6 +504,172 @@ class TestGEM040VertexAIQuotaAtDefault:
         check = GEM040VertexAIQuotaAtDefault()
         findings = check.evaluate(empty_inventory)
         assert findings == []
+
+
+# ---------------------------------------------------------------------------
+# GEM-041 — Gemini API (Generative Language) quota at default
+# ---------------------------------------------------------------------------
+
+
+def _gemini_quota(project_id: str = "test-project", **bucket: object) -> dict:
+    return {
+        "service": "generativelanguage.googleapis.com",
+        "project_id": project_id,
+        "metric": "generativelanguage.googleapis.com/generate_content_requests",
+        "limit_name": "GENERATE-CONTENT-REQUESTS-per-minute-per-project",
+        "quota_buckets": [
+            {"effectiveLimit": 4000, "defaultLimit": 4000, **bucket},
+        ],
+    }
+
+
+class TestGEM041GeminiAPIQuotaAtDefault:
+    def test_fail_when_gemini_api_quota_at_default(
+        self, empty_inventory: ResourceInventory
+    ) -> None:
+        empty_inventory.quota_info.append(_gemini_quota())
+        check = GEM041GeminiAPIQuotaAtDefault()
+        findings = check.evaluate(empty_inventory)
+        assert len(findings) == 1
+        assert findings[0].check_id == "GEM-041"
+        assert findings[0].status == FindingStatus.FAIL
+        assert findings[0].severity == Severity.MEDIUM
+        assert findings[0].evidence["service"] == "generativelanguage.googleapis.com"
+        assert findings[0].evidence["metrics_at_default"] == 1
+        assert findings[0].evidence["metric_examples"] == [
+            "generativelanguage.googleapis.com/generate_content_requests"
+        ]
+
+    def test_one_finding_per_project_not_per_metric(
+        self, empty_inventory: ResourceInventory
+    ) -> None:
+        """Regression: a real project produced 1016 buckets across 56 metrics."""
+        for i in range(56):
+            entry = _gemini_quota()
+            entry["metric"] = f"generativelanguage.googleapis.com/metric_{i}"
+            empty_inventory.quota_info.append(entry)
+
+        findings = GEM041GeminiAPIQuotaAtDefault().evaluate(empty_inventory)
+
+        assert len(findings) == 1, "one aggregated finding, not one per metric"
+        assert findings[0].evidence["metrics_at_default"] == 56
+        assert findings[0].evidence["limit_entries_at_default"] == 56
+        assert len(findings[0].evidence["metric_examples"]) == 10  # capped sample
+
+    def test_two_projects_produce_two_findings(self, empty_inventory: ResourceInventory) -> None:
+        empty_inventory.quota_info.append(_gemini_quota(project_id="proj-a"))
+        empty_inventory.quota_info.append(_gemini_quota(project_id="proj-b"))
+
+        findings = GEM041GeminiAPIQuotaAtDefault().evaluate(empty_inventory)
+
+        assert len(findings) == 2
+        assert {f.resource.project_id for f in findings} == {"proj-a", "proj-b"}
+        assert len({f.finding_id for f in findings}) == 2
+
+    def test_finding_id_is_stable_across_metric_changes(
+        self, empty_inventory: ResourceInventory
+    ) -> None:
+        empty_inventory.quota_info.append(_gemini_quota())
+        first = GEM041GeminiAPIQuotaAtDefault().evaluate(empty_inventory)[0].finding_id
+
+        entry = _gemini_quota()
+        entry["metric"] = "generativelanguage.googleapis.com/embed_content_requests"
+        empty_inventory.quota_info.append(entry)
+        second = GEM041GeminiAPIQuotaAtDefault().evaluate(empty_inventory)[0].finding_id
+
+        assert first == second  # aggregated finding is keyed by project, not by metric
+
+    def test_pass_when_quota_reduced(self, empty_inventory: ResourceInventory) -> None:
+        empty_inventory.quota_info.append(_gemini_quota(effectiveLimit=200, defaultLimit=4000))
+        assert GEM041GeminiAPIQuotaAtDefault().evaluate(empty_inventory) == []
+
+    def test_pass_when_default_is_already_low(self, empty_inventory: ResourceInventory) -> None:
+        empty_inventory.quota_info.append(_gemini_quota(effectiveLimit=10, defaultLimit=10))
+        assert GEM041GeminiAPIQuotaAtDefault().evaluate(empty_inventory) == []
+
+    def test_ignores_vertex_ai_quotas(self, empty_inventory: ResourceInventory) -> None:
+        empty_inventory.quota_info.append(
+            {
+                "service": "aiplatform.googleapis.com",
+                "project_id": "test-project",
+                "metric": "aiplatform.googleapis.com/online_prediction_requests",
+                "limit_name": "ONLINE-PREDICTION-REQUESTS",
+                "quota_buckets": [{"effectiveLimit": 600, "defaultLimit": 600}],
+            }
+        )
+        assert GEM041GeminiAPIQuotaAtDefault().evaluate(empty_inventory) == []
+
+    def test_both_quota_checks_fire_independently(self, empty_inventory: ResourceInventory) -> None:
+        empty_inventory.quota_info.append(_gemini_quota())
+        empty_inventory.quota_info.append(
+            {
+                "service": "aiplatform.googleapis.com",
+                "project_id": "test-project",
+                "metric": "aiplatform.googleapis.com/online_prediction_requests",
+                "limit_name": "ONLINE-PREDICTION-REQUESTS",
+                "quota_buckets": [{"effectiveLimit": 600, "defaultLimit": 600}],
+            }
+        )
+        assert len(GEM041GeminiAPIQuotaAtDefault().evaluate(empty_inventory)) == 1
+        assert len(GEM040VertexAIQuotaAtDefault().evaluate(empty_inventory)) == 1
+
+    def test_pass_on_missing_or_malformed_limits(self, empty_inventory: ResourceInventory) -> None:
+        empty_inventory.quota_info.append(
+            {
+                "service": "generativelanguage.googleapis.com",
+                "project_id": "test-project",
+                "metric": "generativelanguage.googleapis.com/generate_content_requests",
+                "limit_name": "GENERATE-CONTENT-REQUESTS",
+                "quota_buckets": [
+                    {"effectiveLimit": None, "defaultLimit": 4000},
+                    {"effectiveLimit": "unlimited", "defaultLimit": 4000},
+                    {},
+                ],
+            }
+        )
+        assert GEM041GeminiAPIQuotaAtDefault().evaluate(empty_inventory) == []
+
+
+# ---------------------------------------------------------------------------
+# CMN-001 — Billing account with no budget (and the unreadable-budget guard)
+# ---------------------------------------------------------------------------
+
+
+class TestCMN001NoBudget:
+    def _inventory(self, unreadable: list[str] | None = None) -> ResourceInventory:
+        from gcp_abuse_scanner.models.inventory import ProjectInfo
+
+        return ResourceInventory(
+            project_ids=["proj-1"],
+            projects=[ProjectInfo(project_id="proj-1", billing_account_id="ACCT-1")],
+            budgets_unreadable=unreadable or [],
+        )
+
+    def test_fail_when_account_has_no_budget(self) -> None:
+        from gcp_abuse_scanner.checks.common.cmn_budgets import CMN001NoBudget
+
+        findings = CMN001NoBudget().evaluate(self._inventory())
+        assert len(findings) == 1
+        assert findings[0].check_id == "CMN-001"
+        assert findings[0].evidence["billing_account_id"] == "ACCT-1"
+
+    def test_no_finding_when_the_budgets_could_not_be_read(self) -> None:
+        """'We could not look' must not be reported as 'there is no budget'."""
+        from gcp_abuse_scanner.checks.common.cmn_budgets import CMN001NoBudget
+
+        findings = CMN001NoBudget().evaluate(self._inventory(unreadable=["ACCT-1"]))
+
+        assert findings == []
+
+    def test_pass_when_a_budget_exists(self) -> None:
+        from gcp_abuse_scanner.checks.common.cmn_budgets import CMN001NoBudget
+        from gcp_abuse_scanner.models.inventory import BudgetInfo
+
+        inventory = self._inventory()
+        inventory.budgets.append(
+            BudgetInfo(name="billingAccounts/ACCT-1/budgets/b", billing_account_id="ACCT-1")
+        )
+        assert CMN001NoBudget().evaluate(inventory) == []
 
 
 # ---------------------------------------------------------------------------
@@ -541,6 +710,17 @@ class TestGEM050NoAPIKeyCreationRestriction:
 
 
 class TestGEM051NoBudgetForVertexAI:
+    def test_no_finding_when_budgets_could_not_be_read(self) -> None:
+        """GEM-051 asserts absence of budgets — only valid if the API was readable."""
+        from gcp_abuse_scanner.checks.gemini_abuse.gem_extended import GEM051NoBudgetForVertexAI
+
+        inventory = ResourceInventory(
+            project_ids=["proj-1"],
+            organization_id="123456789",
+            budgets_unreadable=["ACCT-1"],
+        )
+        assert GEM051NoBudgetForVertexAI().evaluate(inventory) == []
+
     def test_fail_when_no_budgets(self, empty_inventory_with_org: ResourceInventory) -> None:
         # No budgets at all
         check = GEM051NoBudgetForVertexAI()

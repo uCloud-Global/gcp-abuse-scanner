@@ -10,6 +10,7 @@ GEM-022: Service account with Vertex AI access has user-managed (exportable) key
 GEM-023: roles/aiplatform.user or broader role granted to non-specific principals
 GEM-030: Vertex AI endpoint is publicly accessible (no private network configured)
 GEM-040: Vertex AI quota is at default high value (no throttling configured)
+GEM-041: Gemini API (Generative Language) quota is at default value (no throttling configured)
 GEM-050: Org Policy does not restrict API key / SA key creation
 GEM-051: No budget alert configured covering Vertex AI / Gemini spend
 """
@@ -831,6 +832,76 @@ class GEM030VertexEndpointNoPrivateNetwork(BaseCheck):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# GEM-040 / GEM-041 — quota throttling
+# ---------------------------------------------------------------------------
+
+
+def _uncapped_quota_buckets(
+    quota_info: list[dict], service_filter: str, min_limit: int
+) -> list[dict]:
+    """
+    Return quota buckets that still sit at their default value.
+
+    ``service_filter`` is a substring of the service name, so a caller can target
+    Vertex AI (``aiplatform``) or the Gemini API (``generativelanguage``)
+    independently. A bucket is returned when its effective limit equals the
+    default limit and that default is >= ``min_limit`` (a small default is
+    already tight enough to be an acceptable throttle).
+    """
+    uncapped: list[dict] = []
+
+    for quota_entry in quota_info:
+        service = quota_entry.get("service", "")
+        if service_filter not in service:
+            continue
+
+        project_id = quota_entry.get("project_id", "")
+        metric = quota_entry.get("metric", "")
+        limit_name = quota_entry.get("limit_name", "")
+
+        for bucket in quota_entry.get("quota_buckets", []):
+            effective = bucket.get("effectiveLimit")
+            default = bucket.get("defaultLimit")
+
+            if effective is None or default is None:
+                continue
+
+            try:
+                effective_int = int(effective)
+                default_int = int(default)
+            except (ValueError, TypeError):
+                continue
+
+            if effective_int == default_int and effective_int >= min_limit:
+                uncapped.append(
+                    {
+                        "project_id": project_id,
+                        "service": service,
+                        "metric": metric,
+                        "limit_name": limit_name,
+                        "effective_limit": effective_int,
+                        "default_limit": default_int,
+                    }
+                )
+
+    return uncapped
+
+
+def _group_uncapped_by_project(buckets: list[dict]) -> dict[str, list[dict]]:
+    """Group uncapped quota buckets by project, so one finding covers the whole surface.
+
+    A live scan of a single project produced 1016 buckets across 56 Generative
+    Language metrics: one finding per metric buries the report (and the priority
+    ranking) under a single check. The signal is "this project has no throttle",
+    which is a property of the project, not of each metric.
+    """
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for bucket in buckets:
+        grouped[bucket["project_id"]].append(bucket)
+    return grouped
+
+
 @CheckRegistry.register
 class GEM040VertexAIQuotaAtDefault(BaseCheck):
     """Vertex AI quota is at default high value — no custom throttling configured."""
@@ -843,98 +914,179 @@ class GEM040VertexAIQuotaAtDefault(BaseCheck):
     tags = ["quota", "gemini_abuse", "vertex_ai", "cost_control"]
 
     _MIN_EFFECTIVE_LIMIT = 60  # flag if effectiveLimit >= this value
+    _SERVICE = "aiplatform"
 
     def evaluate(self, inventory: ResourceInventory) -> list[Finding]:
         findings: list[Finding] = []
+        grouped = _group_uncapped_by_project(
+            _uncapped_quota_buckets(inventory.quota_info, self._SERVICE, self._MIN_EFFECTIVE_LIMIT)
+        )
 
-        for quota_entry in inventory.quota_info:
-            service = quota_entry.get("service", "")
-            if "aiplatform" not in service:
-                continue
+        for project_id, buckets in sorted(grouped.items()):
+            metrics = sorted({b["metric"] for b in buckets})
+            findings.append(
+                Finding(
+                    finding_id=_make_id(self.check_id, project_id, self._SERVICE),
+                    check_id=self.check_id,
+                    vector=self.vector,
+                    title=self.title,
+                    severity=self.severity_base,
+                    status=FindingStatus.FAIL,
+                    exploitability_score=4.0,
+                    blast_radius="project",
+                    resource=GCPResource(
+                        resource_type="serviceusage.googleapis.com/QuotaLimit",
+                        resource_id=f"projects/{project_id}/services/{buckets[0]['service']}",
+                        project_id=project_id,
+                        region="global",
+                    ),
+                    evidence={
+                        "project_id": project_id,
+                        "service": buckets[0]["service"],
+                        "metrics_at_default": len(metrics),
+                        "limit_entries_at_default": len(buckets),
+                        "metric_examples": metrics[:10],
+                        "min_effective_limit": self._MIN_EFFECTIVE_LIMIT,
+                    },
+                    description=(
+                        f"{len(metrics)} Vertex AI quota metric(s) in project "
+                        f"'{project_id}' are still at their default value "
+                        f"(>= {self._MIN_EFFECTIVE_LIMIT}), i.e. no custom throttling has "
+                        f"been applied. Examples: {', '.join(metrics[:5])}."
+                    ),
+                    impact=(
+                        "Without quota reduction, a compromised credential can consume "
+                        "Vertex AI resources up to the default (high) limit before "
+                        "any budget alert fires."
+                    ),
+                    remediation=Remediation(
+                        summary=(
+                            "Reduce the Vertex AI quotas that matter for this project to "
+                            "values consistent with expected usage."
+                        ),
+                        steps=[
+                            "Analyze historical Vertex AI usage for this project.",
+                            "Pick the metrics that bound abuse (prediction/generateContent RPM) rather than all of them.",
+                            "Set each quota 20–30% above the expected peak usage.",
+                            "Request the reductions via the Cloud Console.",
+                            "Set up budget alerts to detect anomalous spend.",
+                        ],
+                        gcloud_commands=[
+                            "# List current limits, then request reductions in the Console:",
+                            f"gcloud alpha services quota list --service=aiplatform.googleapis.com --consumer=projects/{project_id}",
+                            "# https://console.cloud.google.com/iam-admin/quotas",
+                        ],
+                        iac_reference="google_service_usage_consumer_quota_override",
+                        docs=[
+                            "https://cloud.google.com/docs/quota/view-manage",
+                            "https://cloud.google.com/vertex-ai/docs/quotas",
+                        ],
+                        effort=RemediationEffort.MEDIUM,
+                    ),
+                    references=self.references,
+                )
+            )
+        return findings
 
-            project_id = quota_entry.get("project_id", "")
-            metric = quota_entry.get("metric", "")
-            limit_name = quota_entry.get("limit_name", "")
 
-            for bucket in quota_entry.get("quota_buckets", []):
-                effective = bucket.get("effectiveLimit")
-                default = bucket.get("defaultLimit")
+@CheckRegistry.register
+class GEM041GeminiAPIQuotaAtDefault(BaseCheck):
+    """
+    Gemini API (Generative Language / AI Studio) quota is at its default value.
 
-                if effective is None or default is None:
-                    continue
+    This is the surface that API keys target: a key that can call
+    generativelanguage.googleapis.com is bounded only by these quotas. GEM-040
+    covers Vertex AI, which is a different service with different credentials
+    and a different quota namespace.
 
-                try:
-                    effective_int = int(effective)
-                    default_int = int(default)
-                except (ValueError, TypeError):
-                    continue
+    One finding per project (not per metric): the live quota namespace has 50+
+    metrics with free/paid tier variants, so per-metric findings are unusable.
+    """
 
-                if effective_int == default_int and effective_int >= self._MIN_EFFECTIVE_LIMIT:
-                    findings.append(
-                        Finding(
-                            finding_id=_make_id(
-                                self.check_id,
-                                project_id,
-                                f"{metric}-{limit_name}",
-                            ),
-                            check_id=self.check_id,
-                            vector=self.vector,
-                            title=self.title,
-                            severity=self.severity_base,
-                            status=FindingStatus.FAIL,
-                            exploitability_score=4.0,
-                            blast_radius="project",
-                            resource=GCPResource(
-                                resource_type="serviceusage.googleapis.com/QuotaLimit",
-                                resource_id=f"{service}/{metric}",
-                                project_id=project_id,
-                                region="global",
-                            ),
-                            evidence={
-                                "project_id": project_id,
-                                "service": service,
-                                "metric": metric,
-                                "limit_name": limit_name,
-                                "effective_limit": effective_int,
-                                "default_limit": default_int,
-                            },
-                            description=(
-                                f"Vertex AI quota metric '{metric}' in project '{project_id}' "
-                                f"has an effective limit of {effective_int} which equals the "
-                                f"default limit ({default_int}). No custom throttling has been "
-                                "applied. High default quotas allow runaway usage if credentials "
-                                "are compromised."
-                            ),
-                            impact=(
-                                "Without quota reduction, a compromised credential can consume "
-                                "Vertex AI resources up to the default (high) limit before "
-                                "any budget alert fires."
-                            ),
-                            remediation=Remediation(
-                                summary=(
-                                    "Reduce the Vertex AI quota to a value consistent with "
-                                    "the project's expected usage to limit blast radius."
-                                ),
-                                steps=[
-                                    "Analyze historical Vertex AI usage for this project.",
-                                    "Set a quota limit 20–30% above the expected peak usage.",
-                                    "Request a quota reduction via the Cloud Console.",
-                                    "Set up budget alerts to detect anomalous spend.",
-                                ],
-                                gcloud_commands=[
-                                    "# Quota changes must be made via Cloud Console or Support:",
-                                    "# https://console.cloud.google.com/iam-admin/quotas",
-                                ],
-                                iac_reference="google_service_usage_consumer_quota_override",
-                                docs=[
-                                    "https://cloud.google.com/docs/quota/view-manage",
-                                    "https://cloud.google.com/vertex-ai/docs/quotas",
-                                ],
-                                effort=RemediationEffort.MEDIUM,
-                            ),
-                            references=self.references,
-                        )
-                    )
+    check_id = "GEM-041"
+    title = "Gemini API (Generative Language) quota is at default value (no throttling configured)"
+    vector = Vector.GEMINI_ABUSE
+    severity_base = Severity.MEDIUM
+    required_collectors = ["quota"]
+    references = ["SOP 5.2 — cuotas de GenAI sin control"]
+    tags = ["quota", "gemini_abuse", "generative_language", "api_keys", "cost_control"]
+
+    _MIN_EFFECTIVE_LIMIT = 60  # flag if effectiveLimit >= this value
+    _SERVICE = "generativelanguage"
+
+    def evaluate(self, inventory: ResourceInventory) -> list[Finding]:
+        findings: list[Finding] = []
+        grouped = _group_uncapped_by_project(
+            _uncapped_quota_buckets(inventory.quota_info, self._SERVICE, self._MIN_EFFECTIVE_LIMIT)
+        )
+
+        for project_id, buckets in sorted(grouped.items()):
+            metrics = sorted({b["metric"] for b in buckets})
+            findings.append(
+                Finding(
+                    finding_id=_make_id(self.check_id, project_id, self._SERVICE),
+                    check_id=self.check_id,
+                    vector=self.vector,
+                    title=self.title,
+                    severity=self.severity_base,
+                    status=FindingStatus.FAIL,
+                    exploitability_score=4.5,
+                    blast_radius="project",
+                    resource=GCPResource(
+                        resource_type="serviceusage.googleapis.com/QuotaLimit",
+                        resource_id=f"projects/{project_id}/services/{buckets[0]['service']}",
+                        project_id=project_id,
+                        region="global",
+                    ),
+                    evidence={
+                        "project_id": project_id,
+                        "service": buckets[0]["service"],
+                        "metrics_at_default": len(metrics),
+                        "limit_entries_at_default": len(buckets),
+                        "metric_examples": metrics[:10],
+                        "min_effective_limit": self._MIN_EFFECTIVE_LIMIT,
+                    },
+                    description=(
+                        f"{len(metrics)} Gemini API quota metric(s) in project "
+                        f"'{project_id}' are still at their default value "
+                        f"(>= {self._MIN_EFFECTIVE_LIMIT}), so any credential that can call "
+                        "the Gemini API — including an API key — can consume the full "
+                        f"default allowance. Examples: {', '.join(metrics[:5])}."
+                    ),
+                    impact=(
+                        "An unrestricted or leaked API key has no cost throttle on the "
+                        "Gemini API surface: the whole default quota can be consumed by a "
+                        "single actor, and the spend only becomes visible through billing "
+                        "after the fact."
+                    ),
+                    remediation=Remediation(
+                        summary=(
+                            "Set project-level quota overrides on the Gemini API limits that "
+                            "matter, and alert before the default allowance is consumed."
+                        ),
+                        steps=[
+                            "List the Gemini API limits actually in use (generateContent, embedContent, countTokens).",
+                            "Compare the defaults with the expected peak usage of the project.",
+                            "Apply an override 20–30% above the expected peak on those limits.",
+                            "Keep high-volume keys restricted (GEM-001/GEM-002/GEM-006) so a leaked key cannot reach the API at all.",
+                            "Pair with a budget alert covering generative language spend (GEM-051).",
+                        ],
+                        gcloud_commands=[
+                            "# Inspect current Gemini API quota limits:",
+                            f"gcloud alpha services quota list --service=generativelanguage.googleapis.com --consumer=projects/{project_id}",
+                            "# Overrides are requested in the Cloud Console or via Support:",
+                            "# https://console.cloud.google.com/iam-admin/quotas",
+                        ],
+                        iac_reference="google_service_usage_consumer_quota_override",
+                        docs=[
+                            "https://cloud.google.com/docs/quota/view-manage",
+                            "https://ai.google.dev/gemini-api/docs/rate-limits",
+                        ],
+                        effort=RemediationEffort.MEDIUM,
+                    ),
+                    references=self.references,
+                )
+            )
         return findings
 
 
@@ -1062,6 +1214,12 @@ class GEM051NoBudgetForVertexAI(BaseCheck):
 
     def evaluate(self, inventory: ResourceInventory) -> list[Finding]:
         findings: list[Finding] = []
+
+        # If the budget API was unreadable and nothing was collected, there is nothing to
+        # assert: BillingCollector recorded a coverage gap for those accounts, and both
+        # "no budget" and "no budget covering Gemini" would be guesses.
+        if inventory.budgets_unreadable and not inventory.budgets:
+            return findings
 
         # Case 1: no budgets at all
         if not inventory.budgets:

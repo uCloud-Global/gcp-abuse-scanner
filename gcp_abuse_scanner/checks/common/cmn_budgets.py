@@ -48,11 +48,14 @@ class CMN001NoBudget(BaseCheck):
             if project.billing_account_id:
                 billing_accounts.add(project.billing_account_id)
 
-        # Find billing accounts with no budgets
+        # Find billing accounts with no budgets. Accounts whose budgets could not be
+        # read at all are excluded: "we could not look" is not "there is no budget"
+        # (they are reported as a coverage gap instead).
         accounts_with_budgets = {b.billing_account_id for b in inventory.budgets}
+        unreadable = set(inventory.budgets_unreadable)
 
         for account_id in billing_accounts:
-            if account_id in accounts_with_budgets:
+            if account_id in accounts_with_budgets or account_id in unreadable:
                 continue
 
             findings.append(

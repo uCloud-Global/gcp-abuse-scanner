@@ -13,6 +13,7 @@
 | CM-005 | VM instances with GPU accelerators detected without org-level restriction | MEDIUM | `compute` | — |
 | CM-006 | VM instance or project has insecure metadata (serial port enabled or OS Login disabled) | MEDIUM | `compute` | CIS GCP 4.4, 4.5 |
 | CM-007 | VM startup script downloads or executes content from external URLs | MEDIUM | `compute` | — |
+| CM-008 | Firewall rule allows database port access from the internet (0.0.0.0/0) | CRITICAL | `network` | CIS GCP 3.6 |
 | CM-009 | VM instance does not have Shielded VM enabled | MEDIUM | `compute` | CIS GCP 4.8 |
 | CM-011 | Org Policy gcp.resourceLocations is not configured (no region restriction) | MEDIUM | `org_policy` | — |
 | CM-020 | GKE node pool has autoscaling enabled without a maxNodeCount limit | HIGH | `gke` | CIS GKE 6.8.1 |
@@ -29,6 +30,7 @@
 | CM-043 | IAM binding grants access to allUsers or allAuthenticatedUsers | CRITICAL | `iam` | CIS GCP 1.18 |
 | CM-044 | Default Compute Engine service account has Editor or Owner role | HIGH | `iam` | CIS GCP 4.1 |
 | CM-045 | IAM Recommender identifies service account with unused compute permissions | MEDIUM | `recommender` | — |
+| CM-046 | Personal (consumer email) account holds Owner or Editor | CRITICAL | `iam` | CIS GCP 1.1 |
 | CM-050 | VPC has no egress deny-all firewall rule (unrestricted outbound traffic) | HIGH | `network` | CIS GCP 3.10 |
 | CM-060 | Project or billing account has no budget or budget alert configured | HIGH | `billing` | — |
 
@@ -278,6 +280,43 @@ gcloud compute instances remove-metadata INSTANCE_NAME \
 **References:**
 - [Startup scripts for Linux](https://cloud.google.com/compute/docs/instances/startup-scripts/linux)
 - [Container-Optimized OS](https://cloud.google.com/container-optimized-os/docs/concepts/features-and-benefits)
+
+---
+
+### CM-008 — Firewall rule allows database port access from the internet (0.0.0.0/0)
+
+**Severity:** CRITICAL
+**Vector:** Crypto Mining
+**Collectors required:** `network`
+**CIS Reference:** [CIS GCP 3.6](https://www.cisecurity.org/benchmark/google_cloud_computing_platform)
+
+**What it detects:**
+Active INGRESS firewall rules that allow traffic from `0.0.0.0/0` or `::/0` on database ports: MySQL/MariaDB (3306) and PostgreSQL (5432). A rule that allows all TCP ports (or `IPProtocol: all`) matches as well, because it exposes those ports too.
+
+**Why it matters:**
+Internet-facing databases are scanned and brute-forced continuously. A compromised database either yields credentials that lead to the surrounding GCP project (where they can be used to provision mining VMs), or the database itself runs on a VM that can be taken over for mining. It is the same class of exposure as CM-004, on the data tier instead of the admin tier.
+
+**Notes:**
+Some managed database engines legitimately need public connectivity. In that case restrict the source range instead of suppressing the check — suppression hides the exposure from every future scan.
+
+**Remediation:**
+1. Identify the legitimate clients that need database access.
+2. Replace the `0.0.0.0/0` source range with specific IP ranges or a VPC CIDR.
+3. For Cloud SQL, disable the public IP and use Private IP or the Cloud SQL Auth Proxy.
+4. Consider VPC Service Controls and private services access.
+
+```bash
+# Restrict to trusted IP range:
+gcloud compute firewall-rules update RULE_NAME \
+  --source-ranges=TRUSTED_IP_RANGE
+
+# Cloud SQL: disable public IP
+gcloud sql instances patch INSTANCE_NAME --no-assign-ip
+```
+
+**References:**
+- [Cloud SQL private IP](https://cloud.google.com/sql/docs/mysql/configure-private-ip)
+- [Cloud SQL Auth Proxy](https://cloud.google.com/sql/docs/postgres/connect-auth-proxy)
 
 ---
 
@@ -811,6 +850,46 @@ gcloud recommender recommendations list \
 **References:**
 - [IAM Recommender overview](https://cloud.google.com/iam/docs/recommender-overview)
 - [Managing IAM recommendations](https://cloud.google.com/iam/docs/recommender-managing)
+
+---
+
+### CM-046 — Personal (consumer email) account holds Owner or Editor
+
+**Severity:** CRITICAL
+**Vector:** Crypto Mining
+**Collectors required:** `iam`
+**CIS Reference:** [CIS GCP 1.1](https://www.cisecurity.org/benchmark/google_cloud_computing_platform)
+
+**What it detects:**
+IAM bindings where a `user:` member with a well-known consumer email domain (gmail.com, googlemail.com, yahoo.com, hotmail.com, outlook.com, live.com, msn.com, icloud.com, aol.com, protonmail.com, proton.me, gmx.com, mail.com, yandex.com, zoho.com) holds `roles/owner` or `roles/editor` on the project or on a resource inside it. One finding is emitted per personal member per binding.
+
+**Why it matters:**
+A personal account is outside the organization's identity lifecycle: 2SV cannot be enforced on it, it is not disabled when the person leaves, and its credential hygiene (password reuse, recovery email, personal device) is unknown. Whoever holds it is a full project administrator of a project that is about to be transferred — exactly the profile an SOP review must catch before handover, because the personal account keeps Owner access after the transfer regardless of what the new IAM design says.
+
+**Scope / limitations:**
+- Only consumer domains are matched, from a fixed list. It is intentionally narrow to avoid false positives on corporate domains.
+- **External corporate accounts** (e.g. `user:alice@vendor.com` with Owner) are **not** detected: identifying them requires the organization's Cloud Identity directory or the enforced `constraints/iam.allowedPolicyMemberDomains` policy, which the scanner does not read. Treat that as a manual question in the review, or export the IAM policy and cross-check domains against the org's verified domains.
+
+**Remediation:**
+1. Confirm who owns the personal account and why it has this role.
+2. Create (or identify) the equivalent identity in Cloud Identity / Workspace.
+3. Grant the role to that managed identity and validate access.
+4. Remove the personal account from the binding.
+5. Enforce `constraints/iam.allowedPolicyMemberDomains` so personal accounts cannot be re-granted.
+6. Audit Cloud Audit Logs for actions performed by the personal account.
+
+```bash
+# Grant to the managed identity first, then remove the personal account:
+gcloud projects add-iam-policy-binding PROJECT_ID \
+  --member='user:managed@your-domain.com' --role='roles/owner'
+
+gcloud projects remove-iam-policy-binding PROJECT_ID \
+  --member='user:someone@gmail.com' --role='roles/owner'
+```
+
+**References:**
+- [Restricting domains with org policy](https://cloud.google.com/resource-manager/docs/organization-policy/restricting-domains)
+- [Cloud Identity overview](https://cloud.google.com/identity/docs/overview)
 
 ---
 

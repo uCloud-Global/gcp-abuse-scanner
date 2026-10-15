@@ -26,6 +26,7 @@ from gcp_abuse_scanner.checks.crypto_mining.cm_iam_extended import (
     CM040BroadComputeCreationRoles,
     CM042BroadServiceAccountActAs,
     CM045RecommenderOverpermissionedSA,
+    CM046PersonalAccountPrivilegedRole,
     CM050NoEgressRestriction,
     CM060NoBudgetAlert,
 )
@@ -1394,6 +1395,122 @@ class TestCM045RecommenderOverpermissionedSA:
         check = CM045RecommenderOverpermissionedSA()
         findings = check.evaluate(inventory)
         assert findings == []
+
+
+# ---------------------------------------------------------------------------
+# CM-046: personal account with Owner/Editor
+# ---------------------------------------------------------------------------
+
+
+def _binding(role: str = "roles/owner", members: list[str] | None = None) -> IAMBinding:
+    return IAMBinding(
+        resource="//cloudresourcemanager.googleapis.com/projects/test-project",
+        resource_type="cloudresourcemanager.googleapis.com/Project",
+        project_id="test-project",
+        role=role,
+        members=members if members is not None else ["user:someone@gmail.com"],
+    )
+
+
+class TestCM046PersonalAccountPrivilegedRole:
+    def test_fail_when_gmail_account_is_owner(self) -> None:
+        inventory = ResourceInventory(project_ids=["test-project"], iam_bindings=[_binding()])
+        findings = CM046PersonalAccountPrivilegedRole().evaluate(inventory)
+        assert len(findings) == 1
+        assert findings[0].check_id == "CM-046"
+        assert findings[0].status == FindingStatus.FAIL
+        assert findings[0].severity == Severity.CRITICAL
+        assert findings[0].evidence["member"] == "user:someone@gmail.com"
+        assert findings[0].evidence["email_domain"] == "gmail.com"
+
+    def test_fail_when_personal_account_is_editor(self) -> None:
+        inventory = ResourceInventory(
+            project_ids=["test-project"],
+            iam_bindings=[_binding("roles/editor", ["user:contractor@proton.me"])],
+        )
+        findings = CM046PersonalAccountPrivilegedRole().evaluate(inventory)
+        assert len(findings) == 1
+        assert findings[0].evidence["role"] == "roles/editor"
+
+    def test_fail_for_each_personal_member(self) -> None:
+        inventory = ResourceInventory(
+            project_ids=["test-project"],
+            iam_bindings=[
+                _binding(
+                    members=[
+                        "user:a@gmail.com",
+                        "user:b@yahoo.com",
+                        "user:managed@corp.example",
+                        "serviceAccount:sa@test-project.iam.gserviceaccount.com",
+                    ]
+                )
+            ],
+        )
+        findings = CM046PersonalAccountPrivilegedRole().evaluate(inventory)
+        assert len(findings) == 2
+        assert {f.evidence["member"] for f in findings} == {"user:a@gmail.com", "user:b@yahoo.com"}
+        assert len({f.finding_id for f in findings}) == 2
+
+    def test_pass_when_managed_account_is_owner(self) -> None:
+        inventory = ResourceInventory(
+            project_ids=["test-project"],
+            iam_bindings=[
+                _binding(members=["user:admin@corp.example", "group:admins@corp.example"])
+            ],
+        )
+        assert CM046PersonalAccountPrivilegedRole().evaluate(inventory) == []
+
+    def test_pass_when_personal_account_has_non_privileged_role(self) -> None:
+        inventory = ResourceInventory(
+            project_ids=["test-project"],
+            iam_bindings=[_binding("roles/viewer", ["user:someone@gmail.com"])],
+        )
+        assert CM046PersonalAccountPrivilegedRole().evaluate(inventory) == []
+
+    def test_pass_when_domain_lookalike_is_not_consumer(self) -> None:
+        """A corporate domain that merely contains 'gmail.com' must not match."""
+        inventory = ResourceInventory(
+            project_ids=["test-project"],
+            iam_bindings=[_binding(members=["user:admin@notgmail.com", "user:x@corp.example"])],
+        )
+        assert CM046PersonalAccountPrivilegedRole().evaluate(inventory) == []
+
+    def test_pass_on_malformed_members(self) -> None:
+        inventory = ResourceInventory(
+            project_ids=["test-project"],
+            iam_bindings=[_binding(members=["user:", "user:no-at-sign", "domain:corp.example"])],
+        )
+        assert CM046PersonalAccountPrivilegedRole().evaluate(inventory) == []
+
+    def test_removal_command_targets_the_personal_member(self) -> None:
+        inventory = ResourceInventory(project_ids=["test-project"], iam_bindings=[_binding()])
+        finding = CM046PersonalAccountPrivilegedRole().evaluate(inventory)[0]
+        assert any(
+            "remove-iam-policy-binding" in cmd and "user:someone@gmail.com" in cmd
+            for cmd in finding.remediation.gcloud_commands
+        )
+
+
+# ---------------------------------------------------------------------------
+# CM-060: budget alerts (and the unreadable-budget guard)
+# ---------------------------------------------------------------------------
+
+
+class TestCM060UnreadableBudgets:
+    def test_no_finding_when_budgets_could_not_be_read(self) -> None:
+        """The budgets API was disabled → CM-060 must not claim there are no budgets."""
+        inventory = ResourceInventory(
+            project_ids=["test-project"],
+            budgets=[],
+            budgets_unreadable=["ACCT-1"],
+        )
+        assert CM060NoBudgetAlert().evaluate(inventory) == []
+
+    def test_still_fails_when_budgets_were_readable(self) -> None:
+        inventory = ResourceInventory(project_ids=["test-project"], budgets=[])
+        findings = CM060NoBudgetAlert().evaluate(inventory)
+        assert len(findings) == 1
+        assert findings[0].check_id == "CM-060"
 
 
 # ---------------------------------------------------------------------------

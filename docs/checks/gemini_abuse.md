@@ -22,6 +22,7 @@
 | GEM-023 | roles/aiplatform.user or broader role granted to non-specific principals | HIGH | `iam` |
 | GEM-030 | Vertex AI endpoint is publicly accessible (no private network configured) | HIGH | `vertex_ai` |
 | GEM-040 | Vertex AI quota is at default high value (no throttling configured) | MEDIUM | `quota` |
+| GEM-041 | Gemini API (Generative Language) quota is at default value (no throttling configured) | MEDIUM | `quota` |
 | GEM-050 | Org Policy does not restrict API key creation (iam.managed.disableServiceAccountKeyCreation absent) | MEDIUM | `org_policy` |
 | GEM-051 | No budget alert configured covering Vertex AI / Gemini spend | HIGH | `billing`, `service_usage` |
 
@@ -482,6 +483,49 @@ Without quota reduction, a compromised credential can consume Vertex AI resource
 **References:**
 - [View and manage quotas](https://cloud.google.com/docs/quota/view-manage)
 - [Vertex AI quotas](https://cloud.google.com/vertex-ai/docs/quotas)
+
+---
+
+### GEM-041 — Gemini API (Generative Language) quota is at default value (no throttling configured)
+
+**Severity:** MEDIUM
+**Vector:** Gemini Abuse
+**Collectors required:** `quota`
+**CIS Reference:** —
+
+**What it detects:**
+Generative Language API quota metrics (`generativelanguage.googleapis.com/*`) where the `effectiveLimit` equals the `defaultLimit` and the effective limit is ≥ 60, indicating no custom quota reduction has been applied. Every metric of the service is collected, because the quota ids differ between free and paid tiers and change over time.
+
+**Granularity:** one finding **per project** (`evidence.metrics_at_default` + `metric_examples`), not one per metric. A live project produced 1016 buckets across 56 metrics; per-metric findings buried the whole report under a single check. The signal — "this project has no throttle on the Gemini surface" — is a property of the project.
+
+**Why it matters:**
+This is the service that API keys with Gemini access actually call. GEM-040 covers Vertex AI — a different service, with different credentials and a different quota namespace — so an organization that had only GEM-040 could pass the quota requirement of the SOP while leaving the API-key surface completely unthrottled. Combined with an unrestricted key (GEM-001/GEM-002/GEM-006), the default allowance can be consumed by a single actor, and the spend only becomes visible in billing after the fact.
+
+**Relationship to other checks:**
+- GEM-040 — Vertex AI (aiplatform) quotas. Same rule, different service.
+- GEM-001/GEM-002/GEM-006 — the key-side controls. Those remove the ability to reach the API; this check limits the damage if a key is still valid.
+- GEM-051 — budget alerts covering Gemini spend (detection after the fact).
+
+**Remediation:**
+1. List the Gemini API quota limits actually in use (`generateContent`, `embedContent`, `countTokens`).
+2. Compare the defaults with the expected peak usage of the project.
+3. Apply a quota override 20–30% above the expected peak.
+4. Keep high-volume keys restricted so a leaked key cannot reach the API at all.
+5. Pair with a budget alert covering generative language spend (GEM-051).
+
+```bash
+# Inspect current Gemini API quota limits:
+gcloud alpha services quota list \
+  --service=generativelanguage.googleapis.com \
+  --consumer=projects/PROJECT_ID
+
+# Overrides are requested in the Cloud Console or via Support:
+# https://console.cloud.google.com/iam-admin/quotas
+```
+
+**References:**
+- [View and manage quotas](https://cloud.google.com/docs/quota/view-manage)
+- [Gemini API rate limits](https://ai.google.dev/gemini-api/docs/rate-limits)
 
 ---
 

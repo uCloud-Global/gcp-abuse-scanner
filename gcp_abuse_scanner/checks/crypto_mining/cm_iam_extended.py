@@ -4,6 +4,7 @@ Crypto Mining checks — IAM / Network (extended).
 CM-040: Broad compute-creation roles granted to wide principals
 CM-042: iam.serviceAccountTokenCreator or serviceAccountUser granted broadly
 CM-045: IAM Recommender identifies SA with unused compute permissions
+CM-046: Personal (consumer email) accounts granted Owner or Editor
 CM-050: VPC has no egress deny-all firewall rule (unrestricted outbound traffic)
 CM-060: Project or billing account has no budget or budget alert configured
 """
@@ -45,6 +46,30 @@ _ACT_AS_ROLES = {
 _COMPUTE_ROLE_KEYWORDS = ("compute.", "container.", "run.")
 
 _RECOMMENDER_REMOVE_SUBTYPES = {"REMOVE_ROLE", "REPLACE_ROLE"}
+
+# Highest-privilege project roles that should never belong to personal accounts.
+_PRIVILEGED_ROLES = {"roles/owner", "roles/editor"}
+
+# Well-known consumer email domains. A user: member on one of these domains is a
+# personal account — outside the organization's identity lifecycle (no MFA
+# enforcement, no offboarding, no key rotation policy).
+_PERSONAL_EMAIL_DOMAINS = {
+    "gmail.com",
+    "googlemail.com",
+    "yahoo.com",
+    "hotmail.com",
+    "outlook.com",
+    "live.com",
+    "msn.com",
+    "icloud.com",
+    "aol.com",
+    "protonmail.com",
+    "proton.me",
+    "gmx.com",
+    "mail.com",
+    "yandex.com",
+    "zoho.com",
+}
 
 
 def _make_id(check_id: str, project_id: str, key: str) -> str:
@@ -383,6 +408,132 @@ class CM045RecommenderOverpermissionedSA(BaseCheck):
 
 
 # ---------------------------------------------------------------------------
+# CM-046
+# ---------------------------------------------------------------------------
+
+
+@CheckRegistry.register
+class CM046PersonalAccountPrivilegedRole(BaseCheck):
+    """
+    A personal (consumer email) account holds Owner or Editor on the project
+    or on a resource inside it.
+
+    Personal accounts sit outside the organization's identity lifecycle: no
+    enforced 2SV, no centralized offboarding, no password/key rotation policy.
+    Ownership is granted to an individual who may leave the organization while
+    keeping full control of the project.
+
+    Scope note: this check matches well-known consumer domains only (gmail.com
+    and friends). Detecting *external corporate* domains (someone@vendor.com)
+    would require the organization's Cloud Identity directory, which the
+    scanner does not read — see docs/checks/crypto_mining.md.
+    """
+
+    check_id = "CM-046"
+    title = "Personal (consumer email) account holds Owner or Editor"
+    vector = Vector.CRYPTO_MINING
+    severity_base = Severity.CRITICAL
+    required_collectors = ["iam"]
+    references = ["CIS GCP 1.1", "SOP 5.2 — cuentas @gmail.com como Owner/Editor"]
+    tags = ["iam", "identity", "crypto_mining", "cloud_identity"]
+
+    def evaluate(self, inventory: ResourceInventory) -> list[Finding]:
+        findings: list[Finding] = []
+        for binding in inventory.iam_bindings:
+            if binding.role.lower() not in _PRIVILEGED_ROLES:
+                continue
+
+            personal = [m for m in binding.members if _personal_email_domain(m)]
+            if not personal:
+                continue
+
+            for member in personal:
+                domain = _personal_email_domain(member)
+                findings.append(
+                    Finding(
+                        finding_id=_make_id(
+                            self.check_id,
+                            binding.project_id,
+                            f"{binding.resource}-{binding.role}-{member}",
+                        ),
+                        check_id=self.check_id,
+                        vector=self.vector,
+                        title=self.title,
+                        severity=self.severity_base,
+                        status=FindingStatus.FAIL,
+                        exploitability_score=9.0,
+                        blast_radius="project",
+                        resource=GCPResource(
+                            resource_type=binding.resource_type,
+                            resource_id=binding.resource,
+                            project_id=binding.project_id,
+                        ),
+                        evidence={
+                            "role": binding.role,
+                            "member": member,
+                            "email_domain": domain,
+                            "all_members": binding.members,
+                        },
+                        description=(
+                            f"Role '{binding.role}' is granted to the personal account "
+                            f"'{member}' (domain '{domain}') on '{binding.resource}'. The "
+                            "account is not governed by the organization's Cloud Identity: "
+                            "2SV cannot be enforced, access is not revoked when the person "
+                            "leaves, and the credential lifecycle is out of your control."
+                        ),
+                        impact=(
+                            f"'{member}' is a full project administrator. If the personal "
+                            "account is compromised (reused password, no enforced 2SV, "
+                            "phishing), the attacker inherits Owner/Editor rights and can "
+                            "provision compute resources, move data, or disable logging — "
+                            "billed to this project and invisible to the organization's "
+                            "identity controls."
+                        ),
+                        remediation=Remediation(
+                            summary=(
+                                "Migrate the personal account to an organization-managed "
+                                "identity (Cloud Identity or Workspace), then remove the "
+                                "personal binding and enforce the domain restriction policy."
+                            ),
+                            steps=[
+                                "Confirm who owns the personal account and why it has this role.",
+                                "Create (or identify) the equivalent identity in Cloud Identity/Workspace.",
+                                "Grant the role to that managed identity and validate access.",
+                                "Remove the personal account from the binding.",
+                                "Enforce constraints/iam.allowedPolicyMemberDomains so personal accounts cannot be re-granted.",
+                                "Audit Cloud Audit Logs for actions performed by the personal account.",
+                            ],
+                            gcloud_commands=[
+                                f"gcloud projects add-iam-policy-binding {binding.project_id} --member='user:managed@your-domain.com' --role='{binding.role}'",
+                                f"gcloud projects remove-iam-policy-binding {binding.project_id} --member='{member}' --role='{binding.role}'",
+                                "# Org-wide (see docs/iam-setup.md for the policy file):\n"
+                                "gcloud resource-manager org-policies set-policy --organization=ORG_ID allowed-domains.yaml",
+                            ],
+                            iac_reference="google_project_iam_binding.members",
+                            docs=[
+                                "https://cloud.google.com/resource-manager/docs/organization-policy/restricting-domains",
+                                "https://cloud.google.com/identity/docs/overview",
+                            ],
+                            effort=RemediationEffort.MEDIUM,
+                        ),
+                        references=self.references,
+                    )
+                )
+        return findings
+
+
+def _personal_email_domain(member: str) -> str:
+    """Return the consumer domain of a `user:` member, or '' when it is not one."""
+    if not member.startswith("user:"):
+        return ""
+    email = member.split(":", 1)[1].strip()
+    if "@" not in email:
+        return ""
+    domain = email.rsplit("@", 1)[-1].lower()
+    return domain if domain in _PERSONAL_EMAIL_DOMAINS else ""
+
+
+# ---------------------------------------------------------------------------
 # CM-050
 # ---------------------------------------------------------------------------
 
@@ -529,6 +680,12 @@ class CM060NoBudgetAlert(BaseCheck):
 
     def evaluate(self, inventory: ResourceInventory) -> list[Finding]:
         findings: list[Finding] = []
+
+        # If the budget API was unreadable and nothing was collected, there is nothing to
+        # assert: BillingCollector recorded a coverage gap for those accounts, and both
+        # "no budget" and "no budget covering Gemini" would be guesses.
+        if inventory.budgets_unreadable and not inventory.budgets:
+            return findings
 
         # Case 1: No budgets at all
         if not inventory.budgets:
