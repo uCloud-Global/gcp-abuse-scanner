@@ -6,7 +6,7 @@ If you discover a security vulnerability in `gcp-abuse-scanner`, please **do not
 
 Instead, report it via:
 - **Email**: hola@ucloudstore.com
-- **GitHub Security Advisories**: [Report a vulnerability](https://github.com/lmoreno0435/gcp-abuse-scanner/security/advisories/new)
+- **GitHub Security Advisories**: [Report a vulnerability](https://github.com/uCloud-Global/gcp-abuse-scanner/security/advisories/new)
 
 We will acknowledge your report within 48 hours and aim to release a fix within 14 days for critical issues.
 

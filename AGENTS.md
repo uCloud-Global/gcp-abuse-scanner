@@ -31,6 +31,11 @@ Task-specific playbooks live in [`skills/`](skills/README.md). Load the matching
    Use `--format json --output <path>` and read the file.
 6. **"No findings" is not "secure" until you check `coverage`.** Collector failures (403, disabled
    APIs, bad credentials) are recorded in the report and the scan can still exit `0`.
+7. **Decide with `risk_assessment`, not with the posture score.** The report carries the SOP risk
+   level (1–4) plus `auto_approval_eligible`. When `auto_approval_eligible` is `false` — because the
+   level is ≥2 *or* because API keys / IAM / network coverage is incomplete — the case goes to human
+   review; never approve it, and never suppress a finding to move the level. See
+   [`docs/risk-model.md`](docs/risk-model.md).
 
 ---
 
@@ -46,18 +51,20 @@ gcp-abuse-scanner version
 
 | Flag | Notes |
 |---|---|
-| `--org/-o ORG_ID` | Digits only. Enumerates ACTIVE projects via Cloud Asset Inventory. **If set, `--project` is ignored.** |
+| `--org/-o ORG_ID` | Digits only — validated up front (non-numeric → usage error, exit 2, before any I/O). Enumerates ACTIVE projects via Cloud Asset Inventory. **If set, `--project` is ignored.** |
 | `--project/-p ID` | Repeatable. Not validated — a typo just shows up as an inaccessible/empty project. |
 | `--exclude-project ID` | Repeatable. Applied after org enumeration. |
 | `--impersonate-service-account EMAIL` | Preferred auth. Caller needs `roles/iam.serviceAccountTokenCreator` on the SA. |
 | `--service-account-key PATH` | Also read from `GOOGLE_APPLICATION_CREDENTIALS`. Discouraged. If the env var points to user ADC or a WIF config, it is used via ADC; a non-key file passed explicitly fails fast (exit 1). **≤0.1.5: such files make every collector fail** — use `--impersonate-service-account`. |
 | `--format/-f` | `console` (default) · `json` · `markdown` · `html` · `sarif` · `all` |
-| `--output PATH` | File path for non-console formats. Default: `gcp-scan-<scanid8>.<ext>` in CWD. **Do not combine with `--format all`** (every format overwrites the same path). |
+| `--output PATH` | File path for non-console formats. Missing parent directories are created. Ignored with `--format console` (warning). **Do not combine with `--format all`** (every format overwrites the same path — the CLI warns). |
 | `--vector V` | Repeatable: `crypto_mining`, `gemini_abuse`, `common`. Invalid values are rejected up front (usage error, exit 2). **≤0.1.5: an invalid value crashes after collection.** |
-| `--allowlist PATH` | YAML list of rules, top-level or under an `allowlist:` key; validated before collection (exit 1 if malformed). A missing file only prints a warning. **≤0.1.5: only the top-level list works** — see allowlist skill. |
+| `--allowlist PATH` | YAML list of rules, top-level or under an `allowlist:` key; validated before collection (exit 1 if malformed, or if the path is a directory). A missing file only prints a warning; an unreadable existing file is rejected by the CLI layer (exit 2). **≤0.1.5: only the top-level list works** — see allowlist skill. |
 | `--dry-run` | Resolves scope and lists all checks; no collection. With `--project` it needs no credentials. |
 | `--cache/--no-cache`, `--cache-ttl SECONDS` | Gzip inventory cache in `~/.cache/gcp-abuse-scanner/` (default off, TTL 3600). Use `--no-cache` when verifying a fix. |
 | `--verbose/-v` | Debug logs (noisy). Prefer reading `coverage` in the JSON report. |
+| `--transport` | `requests` (default) or `httplib2` (legacy). An unknown value is a usage error (exit 2) — a typo would otherwise fail every discovery client and *still* exit 0 with an empty report. Env: `GCP_ABUSE_SCANNER_TRANSPORT`. |
+| `--request-timeout SECONDS` | Timeout per GCP API request (default 30, `0` = no timeout). `httplib2` cannot take a per-request timeout, which is why `requests` is the default. |
 
 ### Exit codes
 
@@ -65,7 +72,7 @@ gcp-abuse-scanner version
 |---|---|
 | `0` | Scan completed, no active CRITICAL findings (also: empty scope, dry-run). |
 | `1` | No scope given, scope resolution failed, credentials could not be loaded, malformed allowlist, or an unhandled error. |
-| `2` | Scan completed **and** ≥1 active (non-suppressed) CRITICAL finding — report was written. **Also** used by Typer for usage errors (bad flag / `--format` / `--vector`). Disambiguate by checking that the report file exists. |
+| `2` | Scan completed **and** ≥1 active (non-suppressed) CRITICAL finding — report was written. **Also** used for usage errors: unknown flag/command, bad `--format`/`--vector`/`--transport`, non-numeric `--org`, empty `--project`, negative `--request-timeout`/`--cache-ttl`, unreadable `--allowlist`. Disambiguate by checking that the report file exists. |
 
 ### Canonical agent invocation
 
@@ -74,22 +81,24 @@ gcp-abuse-scanner scan --project my-proj \
   --impersonate-service-account scanner@scanner-proj.iam.gserviceaccount.com \
   --format json --output /tmp/scan.json ; echo "exit=$?"
 python skills/gcp-abuse-scanner-triage/scripts/summarize_report.py /tmp/scan.json
+jq '.risk_assessment | {level, label, auto_approval_eligible, blockers: .auto_approval_blockers}' /tmp/scan.json
 ```
 
-Org scans can take many minutes (11 collectors × N projects); run them in the background with a generous timeout.
+Org scans can take many minutes (12 collectors × N projects); run them in the background with a generous timeout.
 
 ---
 
 ## Report model (JSON)
 
-Top-level keys: `metadata`, `executive_summary`, `coverage`, `findings[]`.
+Top-level keys: `metadata`, `executive_summary`, `coverage`, `findings[]`, `risk_assessment`.
 
-- `executive_summary`: `posture_score` (0–100), `total_findings` (active only), `by_severity`, `by_vector[]`, `top_findings[]` (top 10).
-- `coverage`: `projects_scanned`, `inaccessible_project_ids`, `checks_*` counters, `skipped_apis_by_project`, `collector_errors[]`. **Always check coverage before claiming a project is clean** — a disabled API or 403 produces *no findings*, not a pass.
+- `executive_summary`: `posture_score` (0–100, **scope-normalized and floored at 0** — one CRITICAL is already `0.0` on a single-project scan, so never read it alone), `penalty_points` (raw severity sum, scope-independent — the metric for comparing two scans), `total_findings` (active only), `by_severity`, `by_vector[]`, `top_findings[]` (top 10).
+- `risk_assessment`: **the SOP decision**. `level` (1–4), `label`, `rationale`, `triggering_check_ids[]`, `triggers[]`, `coverage_complete`, `coverage_gaps[]` (`domain`, `reason`, `projects`, `missing_apis`, `collectors`, `affected_checks`), `auto_approval_eligible`, `auto_approval_blockers[]`.
+- `coverage`: `projects_scanned`, `inaccessible_project_ids`, `checks_*` counters, `checks_not_applicable_ids[]`, `checks_errored_ids[]`, `skipped_apis_by_project`, `unreadable_budget_accounts[]`, `collector_errors[]`. **Always check coverage before claiming a project is clean** — a disabled API or 403 produces *no findings*, not a pass.
 - `findings[]`: `finding_id`, `check_id`, `vector`, `severity`, `priority_rank` (1 = fix first; `null` if suppressed), `exploitability_score`, `blast_radius`, `resource{project_id,resource_type,resource_id}`, `evidence`, `description`, `impact`, `remediation{summary,steps,gcloud_commands,iac_reference,docs,effort}`, `suppressed`, `suppression_reason`. Suppressed findings are included (with `suppressed: true`).
 - Known quirk: `metadata.tool_version` is always `"0.1.0"`; use `gcp-abuse-scanner version` instead.
 
-Checks: 47 total (25 `CM-*`, 16 `GEM-*`, 6 `CMN-*`). Source of truth: `gcp-abuse-scanner list-checks`;
+Checks: 50 total (27 `CM-*`, 17 `GEM-*`, 6 `CMN-*`). Source of truth: `gcp-abuse-scanner list-checks`;
 details in [`docs/checks/`](docs/checks/).
 
 ---
@@ -98,14 +107,15 @@ details in [`docs/checks/`](docs/checks/).
 
 ```bash
 pip install -e ".[dev]"          # Python ≥ 3.11
-pytest                           # 285 offline tests, < 2s, no GCP calls
+pytest                           # offline tests, < 2s, no GCP calls
 ruff check gcp_abuse_scanner tests && black --check gcp_abuse_scanner tests && mypy gcp_abuse_scanner
 ```
 
 Pipeline: `cli.py` → `auth/` (AuthManager, ScopeResolver) → `collectors/engine.py` (ServiceUsage first,
-then 11 collectors concurrently) → `checks/` (auto-registered via `@CheckRegistry.register`) →
-`scoring/engine.py` (allowlist, priority rank, posture score) → `reporters/`. See
-[`docs/architecture.md`](docs/architecture.md).
+then 11 collectors concurrently, 12 in total) → `checks/` (auto-registered via `@CheckRegistry.register`) →
+`scoring/engine.py` (allowlist, priority rank, posture score) → `scoring/risk.py` (SOP level 1–4 +
+coverage gate) → `reporters/`. See [`docs/architecture.md`](docs/architecture.md) and
+[`docs/risk-model.md`](docs/risk-model.md).
 
 Invariants:
 - Checks **never** call GCP APIs — they only read `ResourceInventory`. Collectors never evaluate posture.

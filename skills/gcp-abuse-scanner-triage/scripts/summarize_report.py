@@ -5,11 +5,15 @@ Usage:
     python summarize_report.py REPORT.json [--top N] [--severity CRITICAL,HIGH]
                                [--project ID] [--check CM-004] [--remediation] [--json]
 
-Default output: scope, posture, severity counts, coverage gaps, findings grouped by check
-(count + affected projects), and the top-N findings by priority_rank.
+Default output: scope, SOP risk level (1–4) + coverage gate, posture, severity counts, coverage gaps,
+findings grouped by check (count + affected projects), and the top-N findings by priority_rank.
 --remediation adds steps and gcloud commands to the top-N list (these commands MODIFY
 resources — present them to a human, never run them unattended).
 --json emits the same summary as JSON for further processing.
+
+The risk level and `auto_approval_eligible` come straight from the report's `risk_assessment`
+(see docs/risk-model.md). Do not re-derive the level from severity counts: coverage gaps also
+have to block approval, and this script reports them.
 """
 
 from __future__ import annotations
@@ -82,7 +86,9 @@ def build(data: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
             "vectors": meta.get("vectors_scanned"),
             "identity": meta.get("service_account"),
         },
+        "risk": _risk(data.get("risk_assessment")),
         "posture_score": es["posture_score"],
+        "penalty_points": es.get("penalty_points"),
         "by_severity": {k: v for k, v in es["by_severity"].items() if k != "total" and v},
         "active_findings": es["total_findings"],
         "suppressed_findings": sum(1 for f in data["findings"] if f.get("suppressed")),
@@ -106,16 +112,65 @@ def build(data: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _risk(risk: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Condense risk_assessment (SOP level 1–4 + coverage gate) for the summary."""
+    if not risk:
+        return None
+    return {
+        "level": risk.get("level"),
+        "label": risk.get("label"),
+        "rationale": risk.get("rationale"),
+        "coverage_complete": risk.get("coverage_complete"),
+        "auto_approval_eligible": risk.get("auto_approval_eligible"),
+        "blockers": risk.get("auto_approval_blockers", []),
+        "gaps": [
+            {
+                "domain": g.get("domain"),
+                "reason": g.get("reason"),
+                "projects": g.get("projects", []),
+                "missing_apis": g.get("missing_apis", []),
+                "collectors": g.get("collectors", []),
+                "affected_checks": g.get("affected_checks", []),
+            }
+            for g in risk.get("coverage_gaps", [])
+        ],
+    }
+
+
 def render_text(s: dict[str, Any]) -> str:
     out: list[str] = []
     scan = s["scan"]
-    out.append(f"Scan {scan['scan_id'][:8]}  finished {scan['finished_at']}  identity={scan['identity']}")
+    out.append(
+        f"Scan {scan['scan_id'][:8]}  finished {scan['finished_at']}  identity={scan['identity']}"
+    )
     out.append(f"Scope: {scan['scope']}  vectors={','.join(scan['vectors'] or [])}")
     sev = ", ".join(f"{k.upper()}={v}" for k, v in s["by_severity"].items()) or "none"
+    penalty = s.get("penalty_points")
+    penalty_txt = f"  penalty={penalty:g} pts" if isinstance(penalty, (int, float)) else ""
     out.append(
-        f"Posture score: {s['posture_score']}/100  active={s['active_findings']} ({sev})"
-        f"  suppressed={s['suppressed_findings']}"
+        f"Posture score: {s['posture_score']}/100{penalty_txt}  "
+        f"active={s['active_findings']} ({sev})  suppressed={s['suppressed_findings']}"
     )
+    if isinstance(penalty, (int, float)) and s["posture_score"] == 0.0 and penalty > 0:
+        out.append(
+            "  posture is floored at 0 for this scope — compare scans with penalty points, "
+            "decide with the risk level."
+        )
+
+    risk = s.get("risk")
+    if risk:
+        out.append(
+            f"SOP risk level: {risk['level']}/4 ({risk['label']})  "
+            f"auto_approval_eligible={str(risk['auto_approval_eligible']).lower()}"
+        )
+        out.append(f"  {risk['rationale']}")
+        for blocker in risk["blockers"]:
+            out.append(f"  ! {blocker}")
+    else:
+        out.append(
+            "SOP risk level: not present in this report (pre-0.1.6 scan) — re-run to get it, "
+            "or read docs/risk-model.md"
+        )
 
     cov = s["coverage"]
     c = cov["checks"]
@@ -141,7 +196,9 @@ def render_text(s: dict[str, Any]) -> str:
     for e in s["by_check"]:
         projs = e["projects"]
         shown = ", ".join(projs[:3]) + (f" +{len(projs) - 3}" if len(projs) > 3 else "")
-        out.append(f"  [{e['severity']:<8}] {e['check_id']:<8} x{e['count']:<3} {e['title']}  ({shown})")
+        out.append(
+            f"  [{e['severity']:<8}] {e['check_id']:<8} x{e['count']:<3} {e['title']}  ({shown})"
+        )
 
     if s["top_findings"]:
         out.append(f"\nTop {len(s['top_findings'])} by priority:")
@@ -157,12 +214,16 @@ def render_text(s: dict[str, Any]) -> str:
         if t.get("iac_reference"):
             out.append(f"      IaC: {t['iac_reference']}")
     if any(t.get("gcloud_commands") for t in s["top_findings"]):
-        out.append("\n(gcloud commands above modify resources — require human approval before running.)")
+        out.append(
+            "\n(gcloud commands above modify resources — require human approval before running.)"
+        )
     return "\n".join(out)
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("report", type=Path)
     p.add_argument("--top", type=int, default=10)
     p.add_argument("--severity", help="Comma-separated, e.g. CRITICAL,HIGH")

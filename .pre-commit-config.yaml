@@ -1,13 +1,22 @@
+# Local hooks mirror CI exactly (see .github/workflows/ci.yml and CONTRIBUTING.md -> Code Style):
+#   ruff  -> lint   (CI: ruff check)
+#   black -> format (CI: black --check; [tool.black] in pyproject.toml is the source of truth)
+#
+# Do NOT add `ruff-format`: ruff's formatter and black disagree in both directions
+# (verified with ruff 0.17 / black 26.10.1 -- each reformats the other's output), so a config
+# with both never converges and leaves the working tree fighting itself.
+#
+# Keep the `rev:` pins below in sync with the versions CI resolves from pyproject.toml
+# (`ruff>=0.4.0`, `black>=24.4.0` -> currently the latest release of each).
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.4.4
+    rev: v0.17.0
     hooks:
       - id: ruff
         args: [--fix]
-      - id: ruff-format
 
   - repo: https://github.com/psf/black
-    rev: 24.4.2
+    rev: 26.10.1
     hooks:
       - id: black
 
@@ -20,3 +29,7 @@ repos:
       - id: check-json
       - id: check-merge-conflict
       - id: detect-private-key
+        # tests/unit/test_auth.py embeds a PEM key header to simulate a service-account
+        # key file; the body is a 16-character placeholder, not a real credential.
+        # Excluded so the hook stays meaningful instead of failing for every contributor.
+        exclude: ^tests/unit/test_auth\.py$

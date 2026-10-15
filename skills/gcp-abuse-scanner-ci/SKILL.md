@@ -87,6 +87,20 @@ Notes:
 - Validate the allowlist in the same workflow:
   `python skills/gcp-abuse-scanner-allowlist/scripts/validate_allowlist.py allowlists/production.yaml`.
 
+### Gating on the risk level instead of the exit code
+
+Exit codes only know about CRITICAL findings; they say nothing about coverage. If the pipeline decides
+"may this run be accepted", gate on the report's own verdict — level 1 *and* complete coverage:
+
+```bash
+jq -e '.risk_assessment.auto_approval_eligible == true' scan.json \
+  || { echo "::error::$(jq -r '.risk_assessment.auto_approval_blockers | join("; ")' scan.json)"; exit 1; }
+```
+
+Remember the two failure modes this catches that exit `0` does not: a level-2/3 result with no
+CRITICAL, and an incomplete scan where API keys, IAM or network could not be read
+(`coverage_gaps[]`). See [`docs/risk-model.md`](../../docs/risk-model.md).
+
 ## Drift alerting
 
 Keep the previous `scan.json` (artifact or bucket) and run
@@ -95,7 +109,7 @@ when new findings appear; post the NEW section to the team channel.
 
 ## Docker / other runners
 
-Use the image (`ghcr.io/lmoreno0435/gcp-abuse-scanner:<version>`, entrypoint = CLI, non-root user,
+Use the image (`ghcr.io/ucloud-global/gcp-abuse-scanner:<version>`, entrypoint = CLI, non-root user,
 workdir `/reports`) with a writable host dir mounted at `/reports`; credential mounting is covered in
 the setup skill. With WIF inside a container, the `external_account` config's token source file must
 also be mounted — running the pip-installed CLI directly on the runner is simpler.

@@ -66,6 +66,18 @@ which silently widens the rule. A rule with no matching fields suppresses **ever
 6. Re-run the scan (use `--cache` to skip re-collection when only the allowlist changed) and confirm
    the suppressed count in the summary.
 
+## Pre-transfer assessment (budget checks)
+
+One sanctioned, time-boxed exception ships with the repo: `examples/allowlist-pre-transfer.yaml`.
+Budgets live on the billing account, and before the transfer that account belongs to the client, so
+CMN-001, CMN-002, CM-060 and GEM-051 cannot be evaluated — they either report "no budget" or get
+skipped, and both distort the result. Suppress those four during the pre-transfer assessment only,
+then re-scan **without** the allowlist after the transfer to verify the alarm package is deployed.
+Rationale in [`docs/risk-model.md`](../../docs/risk-model.md) §5.
+
+Remember that a suppression changes the SOP risk level: a suppressed finding does not count toward
+the level. Never use the allowlist to reach level 1.
+
 ## Auditing an existing allowlist
 
 Run the validator with `--report` on a fresh scan. Report to the user: stale rules (match nothing),

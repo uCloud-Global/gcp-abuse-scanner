@@ -1,0 +1,41 @@
+# Pre-transfer allowlist — gcp-abuse-scanner
+#
+# Purpose: suppress the budget/alert checks during the assessment that runs
+# BEFORE the billing account transfer.
+#
+# Why: budgets live on the billing account. Before the transfer the project is
+# still attached to the CLIENT's billing account, which the scanner identity
+# cannot read. Those checks therefore report "no budget" or get skipped, and in
+# both cases they distort the result even though the client cannot act on them.
+#
+# Usage:
+#   gcp-abuse-scanner scan --project CLIENT_PROJECT \
+#     --impersonate-service-account scanner@scanner-proj.iam.gserviceaccount.com \
+#     --allowlist examples/allowlist-pre-transfer.yaml \
+#     --format json --output pre-transfer.json
+#
+# !! EXPIRE THIS FILE AFTER THE TRANSFER !!
+# Once the project is on the uCloud billing account, re-scan WITHOUT this
+# allowlist to verify that the alarm package is actually deployed and firing.
+#
+# Review: see docs/risk-model.md (§5) and docs/allowlist.md
+#
+# Format note: top-level list — accepted by every released version. The
+# `allowlist:` wrapper form only works on versions after 0.1.5 (see the
+# allowlist skill).
+
+# Billing account has no budget configured
+- check_id: CMN-001
+  reason: "Pre-transfer: budgets live on the client's billing account, not readable by the scanner. Remove this rule after the transfer. Reviewed 2026-10-14."
+
+# Budget exists but has no threshold alert rules
+- check_id: CMN-002
+  reason: "Pre-transfer: no observable budget on the client's billing account. Remove this rule after the transfer. Reviewed 2026-10-14."
+
+# Project or billing account has no budget or budget alert configured
+- check_id: CM-060
+  reason: "Pre-transfer: no observable budget on the client's billing account. Remove this rule after the transfer. Reviewed 2026-10-14."
+
+# No budget alert covering Vertex AI / Gemini spend
+- check_id: GEM-051
+  reason: "Pre-transfer: Gemini/Vertex spend alerts belong to the post-transfer alarm package. Remove this rule after the transfer. Reviewed 2026-10-14."

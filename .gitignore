@@ -33,3 +33,11 @@ gcp-scan-*.sarif
 
 # Cache
 ~/.cache/gcp-abuse-scanner/
+
+# Internal / non-source material — must never be published from a client-facing repo
+Propuesta_ruta_combinada.docx
+*.docx
+*.doc
+
+# Agent working state (per-turn file snapshots of this repo)
+.virtuai/

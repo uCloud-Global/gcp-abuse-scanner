@@ -1,4 +1,6 @@
-# Check reference (v0.1.5 — 47 checks)
+# Check reference (v0.1.6 — 50 checks)
+
+Level-4 checks (they force SOP risk level 4 regardless of everything else): **GEM-001, GEM-002, GEM-006, CM-043, GEM-021**. See [`docs/risk-model.md`](../../../docs/risk-model.md).
 
 Generated from `CheckRegistry`. Source of truth: `gcp-abuse-scanner list-checks`; full rationale and
 remediation per check in [`docs/checks/`](../../../docs/checks/). "Collectors" tells you which
@@ -13,6 +15,7 @@ coverage gap would hide the check (see the setup skill).
 | CM-005 | MEDIUM | crypto_mining | compute | VM instances with GPU accelerators detected without org-level restriction |
 | CM-006 | MEDIUM | crypto_mining | compute | VM instance or project has insecure metadata (serial port enabled or OS Login disabled) |
 | CM-007 | MEDIUM | crypto_mining | compute | VM startup script downloads or executes content from external URLs |
+| CM-008 | CRITICAL | crypto_mining | network | Firewall rule allows database port access from the internet (0.0.0.0/0) |
 | CM-009 | MEDIUM | crypto_mining | compute | VM instance does not have Shielded VM enabled |
 | CM-011 | MEDIUM | crypto_mining | org_policy | Org Policy gcp.resourceLocations is not configured (no region restriction) |
 | CM-020 | HIGH | crypto_mining | gke | GKE node pool has autoscaling enabled without a maxNodeCount limit |
@@ -29,6 +32,7 @@ coverage gap would hide the check (see the setup skill).
 | CM-043 | CRITICAL | crypto_mining | iam | IAM binding grants access to allUsers or allAuthenticatedUsers |
 | CM-044 | HIGH | crypto_mining | iam | Default Compute Engine service account has Editor or Owner role |
 | CM-045 | MEDIUM | crypto_mining | recommender | IAM Recommender identifies service account with unused compute permissions |
+| CM-046 | CRITICAL | crypto_mining | iam | Personal (consumer email) account holds Owner or Editor |
 | CM-050 | HIGH | crypto_mining | network | VPC has no egress deny-all firewall rule (unrestricted outbound traffic) |
 | CM-060 | HIGH | crypto_mining | billing | Project or billing account has no budget or budget alert configured |
 | CMN-001 | HIGH | common | billing | Billing account has no budget configured |
@@ -51,6 +55,7 @@ coverage gap would hide the check (see the setup skill).
 | GEM-023 | HIGH | gemini_abuse | iam | roles/aiplatform.user or broader role granted to non-specific principals |
 | GEM-030 | HIGH | gemini_abuse | vertex_ai | Vertex AI endpoint is publicly accessible (no private network configured) |
 | GEM-040 | MEDIUM | gemini_abuse | quota | Vertex AI quota is at default high value (no throttling configured) |
+| GEM-041 | MEDIUM | gemini_abuse | quota | Gemini API (Generative Language) quota is at default value (no throttling configured) |
 | GEM-050 | MEDIUM | gemini_abuse | org_policy | Org Policy does not restrict API key creation (iam.managed.disableServiceAccountKeyCreation absent) |
 | GEM-051 | HIGH | gemini_abuse | billing, service_usage | No budget alert configured covering Vertex AI / Gemini spend |
 
@@ -64,5 +69,7 @@ coverage gap would hide the check (see the setup skill).
 | User-managed SA keys | CM-041, GEM-022, CMN-004 |
 | No budgets / alerts | CMN-001, CMN-002, CM-060, GEM-051 |
 | Missing org policies | CM-002, CM-011, GEM-050, CMN-005 |
-| Open network edge | CM-004, CM-003, CM-050, CM-001 |
+| Open network edge | CM-004, CM-008, CM-003, CM-050, CM-001 |
+| Identity outside Cloud Identity (personal account with Owner/Editor) | CM-046, CM-040, CM-042 |
+| GenAI quota with no throttle | GEM-040, GEM-041 |
 | Unbounded autoscaling | CM-020, CM-021, CM-031 |

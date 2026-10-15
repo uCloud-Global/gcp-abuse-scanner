@@ -54,7 +54,9 @@ def matches(rule: dict[str, Any], f: dict[str, Any]) -> bool:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("allowlist", type=Path)
     p.add_argument("--report", type=Path)
     p.add_argument("--fix-format", action="store_true")
@@ -69,8 +71,10 @@ def main() -> int:
 
     if isinstance(data, dict):
         if isinstance(data.get("allowlist"), list):
-            print("WARN  file uses the `allowlist:` wrapper — gcp-abuse-scanner <= 0.1.5 crashes on it; "
-                  "use a top-level list for those versions (run with --fix-format).")
+            print(
+                "WARN  file uses the `allowlist:` wrapper — gcp-abuse-scanner <= 0.1.5 crashes on it; "
+                "use a top-level list for those versions (run with --fix-format)."
+            )
             if args.fix_format:
                 print("\n# --- corrected allowlist (top-level list) ---")
                 print(yaml.safe_dump(data["allowlist"], sort_keys=False, allow_unicode=True))
@@ -99,7 +103,9 @@ def main() -> int:
         tag += f" {{{', '.join(f'{k}={rule[k]}' for k in MATCH_KEYS & rule.keys())}}}"
         unknown = set(rule) - KNOWN_KEYS
         if unknown:
-            print(f"ERROR {tag}: unknown keys {sorted(unknown)} are ignored by the scanner (rule is broader than it looks)")
+            print(
+                f"ERROR {tag}: unknown keys {sorted(unknown)} are ignored by the scanner (rule is broader than it looks)"
+            )
             errors += 1
         if not any(rule.get(k) for k in MATCH_KEYS):
             print(f"ERROR {tag}: no check_id/project_id/resource_id — suppresses EVERY finding")
@@ -131,11 +137,15 @@ def main() -> int:
             crit = sum(1 for f in hit if f["severity"] == "CRITICAL")
             print(f"INFO  {tag}: suppresses {len(hit)} finding(s)")
             for f in hit[:5]:
-                print(f"        [{f['severity']}] {f['check_id']} {f['resource']['project_id']} :: {f['resource']['resource_id']}")
+                print(
+                    f"        [{f['severity']}] {f['check_id']} {f['resource']['project_id']} :: {f['resource']['resource_id']}"
+                )
             if len(hit) > 5:
                 print(f"        … +{len(hit) - 5} more")
             if crit:
-                print(f"WARN  {tag}: suppresses {crit} CRITICAL finding(s) — needs security sign-off")
+                print(
+                    f"WARN  {tag}: suppresses {crit} CRITICAL finding(s) — needs security sign-off"
+                )
                 warnings += 1
 
     print(f"\n{len(rules)} rule(s): {errors} error(s), {warnings} warning(s)")

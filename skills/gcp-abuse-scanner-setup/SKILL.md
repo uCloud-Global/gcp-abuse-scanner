@@ -19,7 +19,7 @@ a host dir for reports:
 
 ```bash
 docker run --rm -v ~/.config/gcloud:/home/scanner/.config/gcloud:ro -v "$PWD:/reports" \
-  ghcr.io/lmoreno0435/gcp-abuse-scanner:latest \
+  ghcr.io/ucloud-global/gcp-abuse-scanner:latest \
   scan --project PROJECT_ID --impersonate-service-account SA_EMAIL --format json --output /reports/scan.json
 ```
 
@@ -77,6 +77,21 @@ Note: enabling APIs is a change to the customer's environment. A missing API is 
 `roles/aiplatform.viewer`, `roles/billing.viewer`, `roles/recommender.viewer`,
 `roles/orgpolicy.policyViewer`, optional `roles/monitoring.viewer`. Full commands + Terraform:
 [`docs/iam-setup.md`](../../docs/iam-setup.md).
+
+**A generic `roles/viewer` is not the same thing.** It covers Compute/GKE/Cloud Run reads, but it does
+*not* grant the API Keys API, Cloud Asset IAM search, Recommender insights, or Billing — and those are
+exactly the surfaces GEM-001…GEM-006 and CM-043/CM-046 depend on. Because the scanner fails open, the
+result is a scan with no Gemini findings *and* exit code 0. Before promising coverage on a
+two-role handover (e.g. "Viewer + Security Reviewer"), prove it:
+
+```bash
+bash skills/gcp-abuse-scanner-setup/scripts/preflight.sh \
+  --project CLIENT_PROJECT --impersonate "$SA_EMAIL" --coverage
+```
+
+`--coverage` makes one representative read call per collector and prints, for each failure, the checks
+that would come back silently empty. A ❌ there is not a scan error — it is a hole. Grant the missing
+reader role (see the hint list the script prints) or record the accepted gap in writing.
 
 **Impersonation** (preferred over keys): the human/CI identity needs
 `roles/iam.serviceAccountTokenCreator` on the scanner SA. Never create an SA key to "unblock" a scan.

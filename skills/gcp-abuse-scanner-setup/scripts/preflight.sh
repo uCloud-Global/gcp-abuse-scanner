@@ -3,21 +3,28 @@
 #
 # Usage:
 #   bash preflight.sh --scanner-project ID [--impersonate SA_EMAIL] [--org ORG_ID] [--project ID ...]
+#   bash preflight.sh --project ID [--impersonate SA_EMAIL] --coverage
 #
 # Checks: gcloud installed + authenticated, GOOGLE_APPLICATION_CREDENTIALS type,
 # impersonation token minting, scanner-project APIs, per-project APIs, org enumeration.
 # Never enables APIs, grants roles, or creates keys. Exit 0 = all required checks passed.
+#
+# --coverage additionally probes one representative read call per collector and reports the
+# checks that would be skipped. Use it to answer "do these IAM roles actually cover the
+# assessment?" (e.g. SOP's Viewer + Security Reviewer): any ❌ in that section means the
+# corresponding findings can come back empty without the scan failing.
 
 set -uo pipefail
 
-SCANNER_PROJECT=""; IMPERSONATE=""; ORG_ID=""; PROJECTS=()
+SCANNER_PROJECT=""; IMPERSONATE=""; ORG_ID=""; PROJECTS=(); COVERAGE=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --scanner-project) SCANNER_PROJECT="$2"; shift 2 ;;
     --impersonate)     IMPERSONATE="$2"; shift 2 ;;
     --org)             ORG_ID="$2"; shift 2 ;;
     --project)         PROJECTS+=("$2"); shift 2 ;;
-    -h|--help)         sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --coverage)        COVERAGE=1; shift ;;
+    -h|--help)         sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; exit 64 ;;
   esac
 done
@@ -104,6 +111,59 @@ fi
 for p in "${PROJECTS[@]+"${PROJECTS[@]}"}"; do
   check_apis "$p" "Target project" "$PROJECT_APIS" warn
 done
+
+# 8. Role/coverage probe (--coverage) — one read call per collector
+#    A failure here does NOT make the scan fail: it makes it silently incomplete.
+GAPS=0
+probe() {  # $1 = collector, $2 = checks at risk, $3.. = command
+  local collector="$1" checks="$2"; shift 2
+  if "$@" >/dev/null 2>&1; then
+    ok "coverage/$collector: readable (checks: $checks)"
+  else
+    GAPS=$((GAPS + 1))
+    bad "coverage/$collector: NOT readable → $checks would be silently empty"
+  fi
+}
+
+if [[ $COVERAGE -eq 1 ]]; then
+  echo
+  echo "─ Coverage probe (read-only, one call per collector) ─────────────"
+  if [[ ${#PROJECTS[@]} -eq 0 ]]; then
+    warn "No --project given — coverage probe needs at least one target project"
+  else
+    P="${PROJECTS[0]}"
+    probe api_keys   "GEM-001..GEM-006, GEM-010" gcloud services api-keys list --project="$P" --format="value(name)" "${IMP_FLAG[@]}"
+    probe iam        "CM-040..CM-046, GEM-020..GEM-023" gcloud asset search-all-iam-policies --scope="projects/$P" --format="value(resource)" --limit=1 "${IMP_FLAG[@]}"
+    probe iam        "CMN-004 (service accounts)" gcloud iam service-accounts list --project="$P" --format="value(email)" "${IMP_FLAG[@]}"
+    probe network    "CM-003, CM-004, CM-008, CM-050" gcloud compute firewall-rules list --project="$P" --format="value(name)" "${IMP_FLAG[@]}"
+    probe compute    "CM-001, CM-005, CM-006, CM-007, CM-009" gcloud compute instances list --project="$P" --format="value(name)" "${IMP_FLAG[@]}"
+    probe gke        "CM-020..CM-026" gcloud container clusters list --project="$P" --format="value(name)" "${IMP_FLAG[@]}"
+    probe cloud_run  "CM-030, CM-031" gcloud run services list --project="$P" --format="value(metadata.name)" "${IMP_FLAG[@]}"
+    probe vertex_ai  "GEM-030" gcloud ai endpoints list --project="$P" --region=us-central1 --format="value(name)" "${IMP_FLAG[@]}"
+    probe quota      "GEM-040, GEM-041" gcloud alpha services quota list --service=aiplatform.googleapis.com --consumer="projects/$P" --format="value(name)" "${IMP_FLAG[@]}"
+    probe recommender "CM-045" gcloud recommender recommendations list --project="$P" --recommender=google.iam.policy.Recommender --location=global --format="value(name)" "${IMP_FLAG[@]}"
+    probe org_policy "CM-002, CM-011, GEM-050, CMN-005" gcloud resource-manager org-policies list --project="$P" --format="value(constraint)" "${IMP_FLAG[@]}"
+    echo
+    if [[ $GAPS -eq 0 ]]; then
+      ok "Coverage probe: every collector readable with the current identity"
+    else
+      warn "$GAPS collector(s) unreadable → the assessment cannot be approved automatically"
+      cat <<'EOF'
+     Each ❌ above is a silent hole, not an error: the scan exits 0 with no findings for it.
+     Roles that are easy to miss when granting only Viewer:
+       - API keys        → roles/serviceusage.apiKeysViewer (or roles/apikeys.viewer)
+       - IAM bindings    → roles/cloudasset.viewer + roles/iam.securityReviewer
+       - Firewalls/VMs   → roles/compute.viewer
+       - GKE / Cloud Run → roles/container.clusterViewer, roles/run.viewer
+       - Vertex AI       → roles/aiplatform.viewer
+       - Quotas          → roles/serviceusage.serviceUsageConsumer (or browser + quota viewer)
+       - Recommender     → roles/recommender.iamViewer
+       - Billing/budgets → roles/billing.viewer on the billing account (NOT a project role)
+     Either grant the missing reader role or accept the gap in writing — never both silently.
+EOF
+    fi
+  fi
+fi
 
 echo
 if [[ $FAIL -eq 0 ]]; then echo "Preflight passed."; else echo "Preflight found blocking issues (❌)."; fi

@@ -4,10 +4,10 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
-[![CI](https://github.com/lmoreno0435/gcp-abuse-scanner/actions/workflows/ci.yml/badge.svg)](https://github.com/lmoreno0435/gcp-abuse-scanner/actions)
+[![CI](https://github.com/uCloud-Global/gcp-abuse-scanner/actions/workflows/ci.yml/badge.svg)](https://github.com/uCloud-Global/gcp-abuse-scanner/actions)
 [![PyPI](https://img.shields.io/pypi/v/gcp-abuse-scanner.svg)](https://pypi.org/project/gcp-abuse-scanner/)
-[![Docker](https://img.shields.io/badge/docker-ghcr.io-blue)](https://ghcr.io/lmoreno0435/gcp-abuse-scanner)
-[![codecov](https://codecov.io/gh/lmoreno0435/gcp-abuse-scanner/branch/main/graph/badge.svg)](https://codecov.io/gh/lmoreno0435/gcp-abuse-scanner)
+[![Docker](https://img.shields.io/badge/docker-ghcr.io-blue)](https://ghcr.io/ucloud-global/gcp-abuse-scanner)
+[![codecov](https://codecov.io/gh/uCloud-Global/gcp-abuse-scanner/branch/main/graph/badge.svg)](https://codecov.io/gh/uCloud-Global/gcp-abuse-scanner)
 
 `gcp-abuse-scanner` is an open source CLI tool that scans Google Cloud Platform organizations and projects for **security misconfigurations** that can be exploited for:
 
@@ -20,7 +20,7 @@ The tool is **read-only** and **preventive**: it never modifies resources, never
 
 ## Features
 
-- 🔍 **~65+ security checks** across Compute, GKE, Cloud Run, IAM, Networking, API Keys, Vertex AI, Billing, and Org Policies
+- 🔍 **50 security checks** across Compute, GKE, Cloud Run, IAM, Networking, API Keys, Vertex AI, Billing, and Org Policies
 - 🏢 **Organization-wide or per-project** scanning
 - 🔐 **Service account authentication** (impersonation recommended, key file supported)
 - 📊 **Multiple output formats**: Console (rich), JSON, Markdown, HTML, SARIF 2.1.0
@@ -44,7 +44,7 @@ pip install gcp-abuse-scanner
 
 # Or Docker
 docker run --rm -v ~/.config/gcloud:/root/.config/gcloud \
-  ghcr.io/lmoreno0435/gcp-abuse-scanner:latest scan --org YOUR_ORG_ID
+  ghcr.io/ucloud-global/gcp-abuse-scanner:latest scan --org YOUR_ORG_ID
 ```
 
 ### Authentication
@@ -99,6 +99,27 @@ gcp-abuse-scanner list-checks
 # Dry run (resolve scope without scanning)
 gcp-abuse-scanner scan --org 123456789012 --dry-run
 ```
+
+---
+
+## If a scan stalls or collects nothing
+
+The discovery-based collectors talk HTTP over `requests` with an explicit **per-request timeout**
+(default 30 s). `httplib2` — the older default — takes its timeout when the client is built, so one
+stalled socket could hang an org scan indefinitely; if you hit a timeout, raise the limit instead of
+removing it:
+
+```bash
+# Longer timeout for a slow/large org (0 disables the limit entirely)
+gcp-abuse-scanner scan --org 123456789012 --request-timeout 120
+
+# Escape hatch: revert to the legacy httplib2 transport (or use GCP_ABUSE_SCANNER_TRANSPORT)
+gcp-abuse-scanner scan --org 123456789012 --transport httplib2
+```
+
+A client that could not be built, an API that is not enabled and a failed collector are recorded in
+`coverage` (and in `risk_assessment.coverage_gaps`) — a scan never turns "could not read" into
+"no findings" silently.
 
 ---
 
@@ -176,12 +197,13 @@ See [docs/iam-setup.md](docs/iam-setup.md) for step-by-step setup instructions a
 
 ## Security Checks
 
-### Crypto Mining Vector (~40 checks)
+### Crypto Mining Vector (27 checks)
 
 | ID | Severity | Description |
 |----|----------|-------------|
 | CM-001 | HIGH | VM instances with external IP addresses |
 | CM-004 | CRITICAL | Firewall allows SSH/RDP from 0.0.0.0/0 |
+| CM-008 | CRITICAL | Firewall allows MySQL/PostgreSQL (3306/5432) from 0.0.0.0/0 |
 | CM-009 | MEDIUM | Shielded VM not enabled |
 | CM-020 | HIGH | GKE node pools with unbounded autoscaling |
 | CM-023 | HIGH | GKE cluster with public endpoint and no authorized networks |
@@ -190,9 +212,10 @@ See [docs/iam-setup.md](docs/iam-setup.md) for step-by-step setup instructions a
 | CM-041 | HIGH | Service accounts with user-managed (exported) keys |
 | CM-043 | CRITICAL | IAM binding grants allUsers/allAuthenticatedUsers |
 | CM-044 | HIGH | Default Compute SA has Editor/Owner role |
+| CM-046 | CRITICAL | Personal (gmail/…) account holds Owner or Editor |
 | ... | ... | See [docs/checks/crypto_mining.md](docs/checks/crypto_mining.md) |
 
-### Gemini API Abuse Vector (~25 checks)
+### Gemini API Abuse Vector (17 checks)
 
 | ID | Severity | Description |
 |----|----------|-------------|
@@ -203,10 +226,11 @@ See [docs/iam-setup.md](docs/iam-setup.md) for step-by-step setup instructions a
 | GEM-021 | CRITICAL | Vertex AI role granted to allUsers/allAuthenticatedUsers |
 | GEM-030 | HIGH | Vertex AI endpoint accessible without private endpoint |
 | GEM-040 | MEDIUM | Vertex AI quotas at default (high) values |
+| GEM-041 | MEDIUM | Gemini API quota at default value (no throttle) |
 | GEM-051 | HIGH | No budget covering Vertex AI/Gemini spend |
 | ... | ... | See [docs/checks/gemini_abuse.md](docs/checks/gemini_abuse.md) |
 
-### Common Checks (~6 checks)
+### Common Checks (6 checks)
 
 | ID | Severity | Description |
 |----|----------|-------------|
@@ -214,6 +238,38 @@ See [docs/iam-setup.md](docs/iam-setup.md) for step-by-step setup instructions a
 | CMN-002 | MEDIUM | Budget exists but has no threshold alert rules |
 | CMN-005 | MEDIUM | Key org policy constraints absent |
 | CMN-006 | MEDIUM | Cloud Audit Logs (Data Access) disabled |
+
+---
+
+## Risk level and coverage gate
+
+Every report carries a `risk_assessment` object that translates the scan into the SOP risk score
+(1–4) and states whether the result can be approved without human review:
+
+| Level | Meaning |
+|---|---|
+| **4** | Unrestricted Gemini API key (`GEM-001`/`GEM-002`/`GEM-006`) or public access (`CM-043`/`GEM-021`) |
+| **3** | Any other CRITICAL (open admin/database ports, identity gaps such as `CM-046`, public Cloud Run) |
+| **2** | HIGH findings, no CRITICAL |
+| **1** | MEDIUM/LOW only **and** complete coverage |
+
+Because the scanner is read-only and fails open, it also records when it *could not look*: if API
+keys, IAM or network input was missing (API not enabled, 403, collector error, inaccessible project),
+`coverage_complete` and `auto_approval_eligible` go `false` and `coverage_gaps[]` names the gap.
+An incomplete scan is never approved automatically — "no findings" from an API the scanner could not
+read is not a pass.
+
+```bash
+jq '.risk_assessment | {level, label, auto_approval_eligible, blockers: .auto_approval_blockers}' report.json
+```
+
+> **`posture_score` (0–100) is not the decision metric.** It is normalized by project count and
+> floors at 0 — one CRITICAL already reports `0.0` on a single-project scan, so it saturates and
+> cannot distinguish "a bit off" from "very bad". Use `risk_assessment.level` to decide and
+> `executive_summary.penalty_points` (raw severity sum, scope-independent) to compare two scans.
+> Details and the arithmetic: [`docs/risk-model.md`](docs/risk-model.md).
+
+Full rule, decision table and the SOP-requirement mapping: [`docs/risk-model.md`](docs/risk-model.md).
 
 ---
 

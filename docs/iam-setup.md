@@ -131,6 +131,28 @@ gcloud asset search-all-resources \
   --limit=5
 ```
 
+### Prove coverage per role (`--coverage`)
+
+**`roles/viewer` is not a substitute for the roles above.** It grants Compute/GKE/Cloud Run reads but
+not the API Keys API, Cloud Asset IAM search, Recommender insights, quotas or Billing — the surfaces
+`GEM-001`…`GEM-006`, `CM-043`, `CM-046` and `CM-041` depend on. The scanner fails open, so what you get
+is a report with no Gemini findings *and* exit code 0.
+
+Before promising coverage for a handover (e.g. "Viewer + Security Reviewer"), run the preflight in
+coverage mode against a project inside the client's org:
+
+```bash
+bash skills/gcp-abuse-scanner-setup/scripts/preflight.sh \
+  --project CLIENT_PROJECT \
+  --impersonate ${SA_EMAIL} \
+  --coverage
+```
+
+It performs one representative read call per collector and prints, for each failure, the checks that
+would come back silently empty. Any ❌ is a hole, not a scan error: grant the missing reader role or
+record the accepted gap in writing. The scanner's own version of this check lands in the report as
+`risk_assessment.coverage_gaps[]` (see [`risk-model.md`](risk-model.md)).
+
 ## Terraform
 
 ```hcl

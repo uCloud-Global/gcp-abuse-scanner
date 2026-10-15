@@ -43,7 +43,9 @@ def brief(f: dict[str, Any]) -> dict[str, str]:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("before", type=Path)
     p.add_argument("after", type=Path)
     p.add_argument("--json", action="store_true")
@@ -58,7 +60,9 @@ def main() -> None:
     new = [brief(a[k]) for k in sorted(a.keys() - b.keys())]
     resolved, uncertain = [], []
     for k in sorted(b.keys() - a.keys()):
-        (uncertain if b[k]["resource"]["project_id"] in lost_coverage else resolved).append(brief(b[k]))
+        (uncertain if b[k]["resource"]["project_id"] in lost_coverage else resolved).append(
+            brief(b[k])
+        )
     persisting = [brief(a[k]) for k in sorted(a.keys() & b.keys())]
 
     result = {
@@ -70,7 +74,8 @@ def main() -> None:
         "resolved": resolved,
         "resolved_uncertain_coverage_changed": uncertain,
         "persisting_count": len(persisting),
-        "scope_changed": before["metadata"].get("project_ids") != after["metadata"].get("project_ids"),
+        "scope_changed": before["metadata"].get("project_ids")
+        != after["metadata"].get("project_ids"),
     }
 
     if args.json:
@@ -80,10 +85,16 @@ def main() -> None:
         print(f"Posture: {ps['before']} → {ps['after']}")
         if result["scope_changed"]:
             print("! Scope differs between reports — deltas may reflect scope, not fixes.")
-        for label, items in (("NEW", new), ("RESOLVED", resolved), ("RESOLVED? (coverage changed)", uncertain)):
+        for label, items in (
+            ("NEW", new),
+            ("RESOLVED", resolved),
+            ("RESOLVED? (coverage changed)", uncertain),
+        ):
             print(f"\n{label}: {len(items)}")
             for i in items:
-                print(f"  [{i['severity']}] {i['check_id']} {i['project_id']} :: {i['resource_id']}")
+                print(
+                    f"  [{i['severity']}] {i['check_id']} {i['project_id']} :: {i['resource_id']}"
+                )
         print(f"\nPERSISTING: {len(persisting)}")
 
     sys.exit(3 if new else 0)

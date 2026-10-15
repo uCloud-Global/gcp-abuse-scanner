@@ -39,7 +39,9 @@ def main(argv: list[str]) -> int:
         from gcp_abuse_scanner.cli import app
         from gcp_abuse_scanner.models.inventory import ResourceInventory
     except ImportError:
-        print("gcp_abuse_scanner is not importable — run `pip install -e .` first.", file=sys.stderr)
+        print(
+            "gcp_abuse_scanner is not importable — run `pip install -e .` first.", file=sys.stderr
+        )
         return 1
 
     data = json.loads(inventory_path.read_text())

@@ -45,7 +45,7 @@ echo "exit=$?"
 |---|---|---|
 | 0 | yes (unless empty scope / dry-run) | Done, no active CRITICAL. **Still check coverage.** |
 | 2 | yes | Done, ≥1 active CRITICAL finding → go to triage skill. |
-| 2 | **no** | Usage error (bad flag / format) — read stderr, fix the command. |
+| 2 | **no** | Usage error: unknown flag/command, bad `--format`/`--vector`/`--transport`, non-numeric `--org`, empty `--project`, negative `--request-timeout`/`--cache-ttl`, unreadable `--allowlist`. Read stderr, fix the command. |
 | 1 | no | No scope, scope resolution failed (Cloud Asset / permissions), credentials failed to load, malformed allowlist. Read stderr. |
 
 Then summarize:
@@ -58,6 +58,16 @@ Before reporting "clean", confirm: `coverage.projects_scanned` matches expectati
 `inaccessible_project_ids` is empty, `collector_errors` is empty, and `skipped_apis_by_project`
 only lists services the user doesn't use.
 
+The report also carries the SOP decision object — read it instead of guessing from severities:
+
+```bash
+jq '.risk_assessment | {level, label, auto_approval_eligible, blockers: .auto_approval_blockers}' "$OUT"
+```
+
+`auto_approval_eligible: false` means either the level is ≥2 or a sensitive domain (API keys, IAM,
+network) could not be read. A scan that exits `0` with an incomplete `risk_assessment` is **not** a
+clean scan — it is an undetermined one. See [`docs/risk-model.md`](../../docs/risk-model.md).
+
 ## Common recipes
 
 ```bash
@@ -67,6 +77,10 @@ gcp-abuse-scanner list-checks --vector gemini_abuse
 # Gemini/Vertex exposure only, whole org minus sandboxes
 gcp-abuse-scanner scan --org 123456789012 --exclude-project sandbox-1 \
   --vector gemini_abuse --impersonate-service-account "$SA" --format json --output gem.json
+
+# Assessment BEFORE the billing transfer (budgets are unreadable until then)
+gcp-abuse-scanner scan --project client-proj --impersonate-service-account "$SA" \
+  --allowlist examples/allowlist-pre-transfer.yaml --format json --output pre.json
 
 # Verify a fix: same scope, no cache, then diff against the previous report
 gcp-abuse-scanner scan --project my-proj --impersonate-service-account "$SA" \

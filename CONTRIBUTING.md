@@ -5,7 +5,7 @@ Thank you for contributing! This guide explains how to add checks, collectors, a
 ## Development Setup
 
 ```bash
-git clone https://github.com/lmoreno0435/gcp-abuse-scanner
+git clone https://github.com/uCloud-Global/gcp-abuse-scanner
 cd gcp-abuse-scanner
 pip install -e ".[dev]"
 pre-commit install
@@ -109,3 +109,29 @@ mypy gcp_abuse_scanner  # type checking
 - [ ] Entry in `docs/checks/<vector>.md`
 - [ ] `ruff`, `black`, `mypy` pass
 - [ ] `pytest` passes with no regressions
+
+## Releasing
+
+Releases are cut from `uCloud-Global/gcp-abuse-scanner` only — never from a personal fork or
+namespace. Everything the pipeline publishes is bound to that repository:
+
+| Artifact | Target | Configured where |
+|---|---|---|
+| PyPI package `gcp-abuse-scanner` | PyPI project owner: **uCloud-Global** | PyPI → project → Publishing → **Trusted publisher**: owner `uCloud-Global`, repository `gcp-abuse-scanner`, workflow `release.yml`, environment `release` |
+| Docker image | `ghcr.io/ucloud-global/gcp-abuse-scanner` | `.github/workflows/release.yml` (derived from `${{ github.repository }}`) |
+| Coverage badge | `codecov.io/gh/uCloud-Global/gcp-abuse-scanner` | Codecov must be re-enabled on the organization repository |
+
+```bash
+# 1. Bump the version in pyproject.toml and add a CHANGELOG entry
+# 2. Tag and push the tag — the Release workflow does the rest
+git tag -a v0.1.6 -m "v0.1.6"
+git push origin v0.1.6
+```
+
+Notes:
+- Publishing uses OIDC trusted publishing (`id-token: write`); no long-lived PyPI token exists
+  in the repository secrets. If the trusted publisher is still registered against a different
+  owner, the PyPI job fails with `invalid-publisher` — fix the PyPI configuration, not the workflow.
+- The Docker image path is lowercased by GitHub; write `ghcr.io/ucloud-global/...` in docs.
+- Add new checks/changes to `CHANGELOG.md` before tagging: users are expected to pin an exact
+  released version, so the changelog is the audit trail.

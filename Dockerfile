@@ -18,8 +18,8 @@ FROM python:3.12-slim AS runtime
 LABEL org.opencontainers.image.title="gcp-abuse-scanner"
 LABEL org.opencontainers.image.description="Preventive GCP security scanner for crypto mining and Gemini API abuse"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
-LABEL org.opencontainers.image.source="https://github.com/lmoreno0435/gcp-abuse-scanner"
-LABEL org.opencontainers.image.documentation="https://github.com/lmoreno0435/gcp-abuse-scanner/tree/main/docs"
+LABEL org.opencontainers.image.source="https://github.com/uCloud-Global/gcp-abuse-scanner"
+LABEL org.opencontainers.image.documentation="https://github.com/uCloud-Global/gcp-abuse-scanner/tree/main/docs"
 
 # Security: non-root user
 RUN groupadd -r scanner && useradd -r -g scanner scanner

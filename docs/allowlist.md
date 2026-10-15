@@ -111,6 +111,27 @@ Suppressed findings are **always included** in reports — they are never silent
 
 ---
 
+## Pre-transfer assessment (billing checks)
+
+Budgets live on the **billing account**. During the assessment that runs *before* the billing
+transfer, the project still belongs to the client's billing account, which the scanner identity
+cannot read — so CMN-001, CMN-002, CM-060 and GEM-051 either report "no budget" or get skipped, and
+both outcomes distort the result.
+
+Use the ready-made allowlist for that phase:
+
+```bash
+gcp-abuse-scanner scan --project CLIENT_PROJECT \
+  --impersonate-service-account scanner@scanner-proj.iam.gserviceaccount.com \
+  --allowlist examples/allowlist-pre-transfer.yaml \
+  --format json --output pre-transfer.json
+```
+
+**It expires with the transfer.** Re-run without the allowlist afterwards to verify that the alarm
+package actually got deployed. Full rationale in [`docs/risk-model.md`](risk-model.md) §5.
+
+---
+
 ## Best practices
 
 1. **Always include a `reason`**. The reason is stored in the report and is essential for audit trails.
