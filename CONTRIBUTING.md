@@ -94,6 +94,10 @@ pytest tests/unit/test_crypto_mining_checks.py -v
 pytest --cov=gcp_abuse_scanner --cov-report=html
 ```
 
+**Coverage plan**: current state (94.2 %), the gap analysis and the staged plan to close it are in
+[`docs/coverage.md`](docs/coverage.md). Follow its tranche order when adding tests, and keep its
+checkboxes up to date as a tranche lands.
+
 ## Code Style
 
 ```bash

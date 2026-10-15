@@ -111,6 +111,10 @@ pytest                           # offline tests, < 2s, no GCP calls
 ruff check gcp_abuse_scanner tests && black --check gcp_abuse_scanner tests && mypy gcp_abuse_scanner
 ```
 
+Coverage: **94.2 %**, with a staged plan to close the gap in [`docs/coverage.md`](docs/coverage.md)
+(highest-value gaps first: `checks/base.py`'s `safe_evaluate`, then collectors, then branch fixtures).
+Add tests in that order rather than wherever coverage is cheapest to raise.
+
 Pipeline: `cli.py` → `auth/` (AuthManager, ScopeResolver) → `collectors/engine.py` (ServiceUsage first,
 then 11 collectors concurrently, 12 in total) → `checks/` (auto-registered via `@CheckRegistry.register`) →
 `scoring/engine.py` (allowlist, priority rank, posture score) → `scoring/risk.py` (SOP level 1–4 +
