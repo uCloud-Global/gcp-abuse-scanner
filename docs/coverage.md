@@ -100,7 +100,7 @@ Only if a compliance requirement demands 100 %.
 - [ ] Add `--cov-fail-under=96` to `[tool.pytest.ini_options] addopts` in `pyproject.toml`, set to
       the level reached by tranche A, and raise it as A and B land. Five minutes, and it is worth
       more than the last 20 lines: CI fails on regression instead of drifting.
-- [ ] **Codecov badge removed from the README** — both badges (`uCloud-Global` and the old
+- [x] **Codecov badge removed from the README** (2026-10-14) — both badges (`uCloud-Global` and the old
       `lmoreno0435`) render `unknown`: the repo never uploaded coverage (the workflow has no
       `CODECOV_TOKEN`, and the action does not fail CI on upload errors, so it fails silently).
       Re-enable only if PR-level coverage deltas are wanted: register the org repo on codecov.io,

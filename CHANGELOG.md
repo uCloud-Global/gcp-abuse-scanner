@@ -5,7 +5,15 @@ All notable changes to `gcp-abuse-scanner` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.6] - 2026-10-14
+## [Unreleased]
+
+### Changed
+- Removed the Codecov badge from the README: it has never shown data (`unknown` for both the
+  organization and the previous personal slug — the workflow has no `CODECOV_TOKEN`, and the
+  upload action does not fail CI, so it silently reported nothing). Coverage stays visible in
+  the CI log and in `docs/coverage.md`; re-enable Codecov only with a token and a coverage gate.
+
+
 
 ### Added
 - `AGENTS.md` and `skills/` — guidance and helper scripts for AI agents using the CLI.

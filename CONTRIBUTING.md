@@ -123,7 +123,7 @@ namespace. Everything the pipeline publishes is bound to that repository:
 |---|---|---|
 | PyPI package `gcp-abuse-scanner` | PyPI project owner: **uCloud-Global** | PyPI → project → Publishing → **Trusted publisher**: owner `uCloud-Global`, repository `gcp-abuse-scanner`, workflow `release.yml`, environment `release` |
 | Docker image | `ghcr.io/ucloud-global/gcp-abuse-scanner` | `.github/workflows/release.yml` (derived from `${{ github.repository }}`) |
-| Coverage badge | `codecov.io/gh/uCloud-Global/gcp-abuse-scanner` | Codecov must be re-enabled on the organization repository |
+| Coverage badge | — retired 2026-10-14 | Codecov never received data (no `CODECOV_TOKEN`). Re-enable only together with a `CODECOV_TOKEN` secret **and** a `--cov-fail-under` gate — see [`docs/coverage.md`](docs/coverage.md) |
 
 ```bash
 # 1. Bump the version in pyproject.toml and add a CHANGELOG entry

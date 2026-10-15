@@ -7,7 +7,6 @@
 [![CI](https://github.com/uCloud-Global/gcp-abuse-scanner/actions/workflows/ci.yml/badge.svg)](https://github.com/uCloud-Global/gcp-abuse-scanner/actions)
 [![PyPI](https://img.shields.io/pypi/v/gcp-abuse-scanner.svg)](https://pypi.org/project/gcp-abuse-scanner/)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io-blue)](https://ghcr.io/ucloud-global/gcp-abuse-scanner)
-[![codecov](https://codecov.io/gh/uCloud-Global/gcp-abuse-scanner/branch/main/graph/badge.svg)](https://codecov.io/gh/uCloud-Global/gcp-abuse-scanner)
 
 `gcp-abuse-scanner` is an open source CLI tool that scans Google Cloud Platform organizations and projects for **security misconfigurations** that can be exploited for:
 
