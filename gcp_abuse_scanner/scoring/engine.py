@@ -134,6 +134,7 @@ class ScoringEngine:
         by_severity = self._count_by_severity(active)
         by_vector = self._count_by_vector(active)
         posture = self._compute_posture_score(active, max_projects)
+        penalty = self._compute_penalty(active)
 
         top_findings = [
             {
@@ -150,6 +151,7 @@ class ScoringEngine:
 
         return ExecutiveSummary(
             posture_score=posture,
+            penalty_points=penalty,
             total_findings=len(active),
             by_severity=by_severity,
             by_vector=by_vector,
@@ -191,6 +193,17 @@ class ScoringEngine:
                 )
             )
         return summaries
+
+    @staticmethod
+    def _compute_penalty(findings: list[Finding]) -> float:
+        """
+        Raw severity penalty, without the scope normalization or the floor at 0.
+
+        This is what posture_score divides and then clamps; keeping it as its own
+        number makes drift measurable (a single-project scan reports 0.0 whether the
+        penalty is 11 or 750 — this number tells them apart).
+        """
+        return float(sum(_SEVERITY_WEIGHTS.get(f.severity, 0.0) for f in findings))
 
     @staticmethod
     def _compute_posture_score(findings: list[Finding], max_projects: int) -> float:

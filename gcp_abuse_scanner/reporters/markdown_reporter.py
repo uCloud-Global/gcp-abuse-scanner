@@ -47,7 +47,8 @@ class MarkdownReporter:
             "",
             "| Metric | Value |",
             "|--------|-------|",
-            f"| Posture Score | **{summary.posture_score}/100** |",
+            f"| Posture Score | **{summary.posture_score}/100** (normalized by project count) |",
+            f"| Penalty points | {summary.penalty_points:g} (scope-independent — use this to compare two scans) |",
             f"| Total Findings | {summary.total_findings} |",
             f"| 🔴 CRITICAL | {summary.by_severity.critical} |",
             f"| 🟠 HIGH | {summary.by_severity.high} |",
@@ -74,6 +75,37 @@ class MarkdownReporter:
             for pid in cov.inaccessible_project_ids:
                 lines.append(f"- `{pid}`")
             lines.append("")
+
+        # Risk assessment (SOP 1–4 + coverage gate)
+        risk = report.risk_assessment
+        if risk is not None:
+            lines += [
+                "---",
+                "",
+                "## Risk Assessment",
+                "",
+                "| Field | Value |",
+                "|-------|-------|",
+                f"| SOP Risk Level | **{risk.level}/4 — {risk.label}** |",
+                f"| Coverage | {'✅ complete' if risk.coverage_complete else f'⚠️ {len(risk.coverage_gaps)} gap(s)'} |",
+                f"| Auto-approval | {'✅ eligible' if risk.auto_approval_eligible else '❌ blocked'} |",
+                "",
+                risk.rationale,
+                "",
+            ]
+            if risk.auto_approval_blockers:
+                lines += ["**Blockers:**", ""]
+                lines += [f"- {b}" for b in risk.auto_approval_blockers]
+                lines.append("")
+            if risk.coverage_gaps:
+                lines += [
+                    "| Domain | Reason | Projects |",
+                    "|--------|--------|----------|",
+                ]
+                for gap in risk.coverage_gaps:
+                    projects = ", ".join(f"`{p}`" for p in gap.projects) or "—"
+                    lines.append(f"| `{gap.domain}` | {gap.reason} | {projects} |")
+                lines.append("")
 
         # Findings
         lines += [

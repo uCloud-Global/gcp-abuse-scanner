@@ -25,16 +25,17 @@ Each stage is independently extensible via a plugin/registry pattern — adding 
                              │ project_ids[]
                     ┌────────▼────────┐
                     │ CollectorEngine │  concurrent, retry/backoff
-                    │  (11 collectors)│
+                    │  (12 collectors)│
                     └────────┬────────┘
                              │ ResourceInventory
                     ┌────────▼────────┐
                     │  CheckRegistry  │  auto-registered plugins
-                    │  (47 checks)    │
+                    │  (50 checks)    │
                     └────────┬────────┘
                              │ [Finding, ...]
                     ┌────────▼────────┐
                     │  ScoringEngine  │  allowlist · priority rank · posture score
+                    │  + risk.py      │  SOP risk level 1–4 · coverage gate
                     └────────┬────────┘
                              │ ScanReport
                     ┌────────▼────────┐
@@ -75,6 +76,15 @@ Collectors are responsible for **reading raw GCP resource data** and populating 
 | `OrgPolicyCollector` | Organization Policy constraints |
 | `RecommenderCollector` | IAM Recommender insights |
 | `QuotaCollector` | Service quota values |
+
+**HTTP transport** (`gcp_abuse_scanner/utils/transport.py`): discovery-based collectors build their
+clients through `BaseCollector.build_client()`, which uses `requests`
+(`google.auth.transport.requests.AuthorizedSession`) with an explicit **per-request timeout** (default
+30 s, `--request-timeout`). `httplib2` takes its timeout when the client is built, so a stalled socket
+turned a scan into an unbounded wait; `--transport httplib2` restores the legacy behaviour.
+A client that cannot be built, an API that is not enabled and a collector that raises are all recorded
+(`record_collector_error()` / `record_skipped_api()`) instead of being swallowed — that is what the
+coverage gate reads. Collectors fail open, but never silently.
 
 **`CollectorEngine`** runs all collectors concurrently using `ThreadPoolExecutor`. Each collector uses `tenacity` for retry/backoff on transient GCP API errors. Inaccessible projects are recorded in `inventory.inaccessible_projects` rather than failing the entire scan.
 
@@ -154,10 +164,40 @@ class Finding:
 
 **Posture score formula**:
 ```
-penalty = Σ severity_weight(finding)   # CRITICAL=10, HIGH=5, MEDIUM=2, LOW=0.5
-baseline = max_projects × 20 × 0.5    # ~20 checks/project at LOW weight
+penalty      = Σ severity_weight(finding)   # CRITICAL=10, HIGH=5, MEDIUM=2, LOW=0.5
+baseline     = max_projects × 20 × 0.5    # ~20 checks/project at LOW weight
 posture_score = max(0, 100 − (penalty / baseline × 100))
+penalty_points = penalty                  # also reported: no normalization, no floor
 ```
+
+**Read `penalty_points`, not `posture_score`, when comparing scans.** The normalization makes the
+score scope-dependent (the same findings: `0.0` for 1 project, `57.5` for 20) and the `max(0, …)`
+floor hides everything once the penalty exceeds the baseline — one CRITICAL already zeroes a
+single-project scan. `penalty_points` is the raw sum: it falls by exactly the weight of each fixed
+finding, in any scope. Full arithmetic in [`risk-model.md`](risk-model.md).
+
+#### Risk level and the coverage gate (`scoring/risk.py`)
+
+The posture score is a progress metric, not a decision. `assess_risk(findings, coverage)` translates
+the scan into the **SOP risk level (1–4)** and decides whether the assessment may be approved without
+human review:
+
+| Level | Rule |
+|---|---|
+| 4 | Any active finding in `LEVEL_4_CHECKS` (GEM-001/002/006, CM-043, GEM-021) |
+| 3 | Any other CRITICAL |
+| 2 | HIGH findings, no CRITICAL |
+| 1 | Only MEDIUM/LOW/INFO |
+
+Independently of the level, the **coverage gate** inspects `coverage` and produces
+`coverage_gaps[]` when an API keys, IAM or network input could not be read (API not enabled or not
+readable, collector error, sensitive check NOT_APPLICABLE or errored, inaccessible project). Any gap
+sets `coverage_complete: false` and `auto_approval_eligible: false`: a scan that could not look
+cannot approve. Collectors feed this by recording skips via
+`BaseCollector.record_skipped_api()` / `record_collector_error()` — never by staying silent.
+
+The result is stored in `ScanReport.risk_assessment` and documented in
+[`risk-model.md`](risk-model.md).
 
 ---
 

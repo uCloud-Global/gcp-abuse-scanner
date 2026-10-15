@@ -36,6 +36,7 @@ class ConsoleReporter:
     def render(self, report: ScanReport) -> None:
         self._render_header(report)
         self._render_executive_summary(report)
+        self._render_risk(report)
         self._render_coverage(report)
         self._render_findings_table(report)
         self._render_remediation_plan(report)
@@ -67,7 +68,8 @@ class ConsoleReporter:
 
         self._console.print(
             Panel(
-                f"Posture Score: [{score_color}]{score}/100[/]\n"
+                f"Posture Score: [{score_color}]{score}/100[/]  "
+                f"[dim](penalty {summary.penalty_points:g} pts — scope-normalized)[/]\n"
                 f"Total Findings: [bold]{summary.total_findings}[/]\n\n"
                 f"  {_SEVERITY_ICONS[Severity.CRITICAL]} CRITICAL: [bold red]{summary.by_severity.critical}[/]   "
                 f"{_SEVERITY_ICONS[Severity.HIGH]} HIGH: [red]{summary.by_severity.high}[/]   "
@@ -77,6 +79,28 @@ class ConsoleReporter:
                 border_style="blue",
             )
         )
+
+    def _render_risk(self, report: ScanReport) -> None:
+        """Render the SOP risk level (1–4) and the coverage gate."""
+        risk = report.risk_assessment
+        if risk is None:
+            return
+        colors = {1: "green", 2: "yellow", 3: "red", 4: "bold red"}
+        color = colors.get(risk.level, "white")
+        gate = (
+            "[green]coverage complete — auto-approval eligible[/]"
+            if risk.auto_approval_eligible
+            else "[yellow]not auto-approvable[/]"
+        )
+        block = (
+            f"Risk Level: [{color}]{risk.level}/4 ({risk.label})[/]\n"
+            f"Coverage: {'[green]complete[/]' if risk.coverage_complete else f'[yellow]{len(risk.coverage_gaps)} gap(s)[/]'}"
+            f" — {gate}\n"
+            f"[dim]{risk.rationale}[/]"
+        )
+        if risk.auto_approval_blockers:
+            block += "\n" + "\n".join(f"  [yellow]•[/] {b}" for b in risk.auto_approval_blockers)
+        self._console.print(Panel(block, title="[bold]Risk Assessment[/]", border_style=color))
 
     def _render_coverage(self, report: ScanReport) -> None:
         cov = report.coverage

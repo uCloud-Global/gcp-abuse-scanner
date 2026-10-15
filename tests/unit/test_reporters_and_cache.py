@@ -209,7 +209,9 @@ class TestHTMLReporter:
         html = HTMLReporter().render(report)
 
         # Coverage data should appear
-        assert "container.googleapis.com" in html  # skipped API  # lgtm[py/incomplete-url-substring-sanitization]
+        assert (
+            "container.googleapis.com" in html
+        )  # skipped API  # lgtm[py/incomplete-url-substring-sanitization]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -347,6 +349,113 @@ class TestSARIFReporter:
 
         assert sarif["runs"][0]["results"] == []
         assert sarif["runs"][0]["tool"]["driver"]["rules"] == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Risk assessment rendering (SOP 1–4 + coverage gate)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _report_with_risk(gaps: bool = False) -> ScanReport:
+    """Report carrying a computed risk_assessment (or a coverage gap)."""
+    from gcp_abuse_scanner.models.finding import Severity as _Severity
+    from gcp_abuse_scanner.scoring.risk import assess_risk
+
+    findings = [_make_finding(check_id="GEM-001", severity=_Severity.CRITICAL)]
+    report = _make_report(findings)
+    coverage = CoverageReport(
+        projects_scanned=2,
+        skipped_apis_by_project={"proj-2": ["apikeys.googleapis.com"]} if gaps else {},
+    )
+    report.coverage = coverage
+    report.risk_assessment = assess_risk(findings, coverage)
+    return report
+
+
+class TestRiskAssessmentRendering:
+    def test_markdown_renders_level_and_blockers(self):
+        from gcp_abuse_scanner.reporters.markdown_reporter import MarkdownReporter
+
+        md = MarkdownReporter().render(_report_with_risk())
+        assert "## Risk Assessment" in md
+        assert "4/4 — CRITICAL" in md
+        assert "auto-approval | ❌ blocked" in md.lower()
+        assert "unrestricted gemini api key" in md.lower()
+
+    def test_markdown_renders_coverage_gap_table(self):
+        from gcp_abuse_scanner.reporters.markdown_reporter import MarkdownReporter
+
+        md = MarkdownReporter().render(_report_with_risk(gaps=True))
+        assert "1 gap(s)" in md
+        assert "| `api_keys` |" in md
+        assert "`proj-2`" in md
+
+    def test_html_renders_risk_card(self):
+        from gcp_abuse_scanner.reporters.html_reporter import HTMLReporter
+
+        html = HTMLReporter().render(_report_with_risk(gaps=True))
+        assert "Risk Assessment" in html
+        assert "4/4 — CRITICAL" in html
+        assert "Coverage Gaps" in html
+        assert "api_keys" in html
+
+    def test_console_renders_risk_panel(self, capsys):
+        from gcp_abuse_scanner.reporters.console_reporter import ConsoleReporter
+
+        ConsoleReporter().render(_report_with_risk(gaps=True))
+        out = capsys.readouterr().out
+        assert "Risk Assessment" in out
+        assert "4/4 (CRITICAL)" in out
+        assert "not auto-approvable" in out
+
+    def test_reporters_tolerate_report_without_risk_assessment(self):
+        """Reports built before the risk model existed must still render."""
+        from gcp_abuse_scanner.reporters.html_reporter import HTMLReporter
+        from gcp_abuse_scanner.reporters.markdown_reporter import MarkdownReporter
+
+        report = _make_report()
+        assert report.risk_assessment is None
+        assert "## Risk Assessment" not in MarkdownReporter().render(report)
+        assert "Risk Assessment" not in HTMLReporter().render(report)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# penalty_points rendering (the scope-independent drift metric)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestPenaltyRendering:
+    def _report(self) -> ScanReport:
+        report = _make_report()
+        report.executive_summary.penalty_points = 85.0
+        return report
+
+    def test_markdown_shows_penalty_and_the_normalization_caveat(self):
+        from gcp_abuse_scanner.reporters.markdown_reporter import MarkdownReporter
+
+        md = MarkdownReporter().render(self._report())
+        assert "Penalty points | 85" in md
+        assert "normalized by project count" in md
+
+    def test_console_shows_penalty_points(self, capsys):
+        from gcp_abuse_scanner.reporters.console_reporter import ConsoleReporter
+
+        ConsoleReporter().render(self._report())
+        assert "penalty 85 pts" in capsys.readouterr().out
+
+    def test_html_shows_penalty_points(self):
+        from gcp_abuse_scanner.reporters.html_reporter import HTMLReporter
+
+        html = HTMLReporter().render(self._report())
+        assert "penalty 85 pts" in html
+
+    def test_penalty_defaults_to_zero_when_not_set(self):
+        """Reports produced before this field existed must still render."""
+        from gcp_abuse_scanner.reporters.markdown_reporter import MarkdownReporter
+
+        report = _make_report()
+        report.executive_summary.penalty_points = 0.0
+        assert "Penalty points | 0" in MarkdownReporter().render(report)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

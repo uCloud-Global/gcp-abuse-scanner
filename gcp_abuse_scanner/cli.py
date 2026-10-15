@@ -135,6 +135,23 @@ def scan(
         int,
         typer.Option("--cache-ttl", help="Cache TTL in seconds (default: 3600)."),
     ] = 3600,
+    transport: Annotated[
+        str | None,
+        typer.Option(
+            "--transport",
+            help=(
+                "HTTP transport for the discovery-based collectors: 'requests' (default) or "
+                "'httplib2' (legacy). Overrides GCP_ABUSE_SCANNER_TRANSPORT."
+            ),
+        ),
+    ] = None,
+    request_timeout: Annotated[
+        float | None,
+        typer.Option(
+            "--request-timeout",
+            help="Timeout in seconds for each GCP API request (0 = no timeout, default: 30).",
+        ),
+    ] = None,
 ) -> None:
     """
     Scan a GCP organization or project(s) for security misconfigurations.
@@ -150,11 +167,53 @@ def scan(
         )
         raise typer.Exit(code=1)
 
+    # ── Usage validation, before any credentials, network I/O or cost ─────────
+    # A bad value here would otherwise surface as a cryptic downstream failure (or, worse,
+    # as a scan that "succeeds" while every collector records a coverage gap).
+    def _usage_error(message: str) -> None:
+        err_console.print(f"[red]Error:[/] {message}")
+        raise typer.Exit(code=2)
+
+    if org is not None and not org.strip().isdigit():
+        _usage_error(f"--org must be a numeric organization ID (digits only), got {org!r}")
+
+    project_ids_input = [p.strip() for p in (project or [])]
+    if any(not p for p in project_ids_input):
+        _usage_error("--project requires a non-empty project ID")
+
+    if request_timeout is not None and request_timeout < 0:
+        _usage_error(f"--request-timeout must be >= 0 (0 = no timeout), got {request_timeout:g}")
+
+    if cache_ttl < 0:
+        _usage_error(f"--cache-ttl must be >= 0, got {cache_ttl}")
+
+    if format == OutputFormat.all and output is not None:
+        err_console.print(
+            "[yellow]Warning:[/] --format all writes every format to the same --output path "
+            "(only the last one survives). Use --format all without --output, or run once per format."
+        )
+    if format == OutputFormat.console and output is not None:
+        err_console.print(
+            "[yellow]Warning:[/] --output is ignored for --format console (output goes to stdout). "
+            "Use --format json|markdown|html|sarif to write a file."
+        )
+
     # Lazy imports to keep startup fast
     from gcp_abuse_scanner.auth import AuthManager, ScopeResolver
     from gcp_abuse_scanner.checks import CheckRegistry
     from gcp_abuse_scanner.models.report import CoverageReport, ScanMetadata, ScanReport
     from gcp_abuse_scanner.scoring import ScoringEngine
+    from gcp_abuse_scanner.scoring.risk import assess_risk
+
+    # Validate the transport name before any other work: an unknown value would make every
+    # discovery client fail, be recorded as a coverage gap, and exit 0 with an empty report.
+    from gcp_abuse_scanner.utils.transport import resolve_transport
+
+    try:
+        selected_transport = resolve_transport(transport)
+    except ValueError as exc:
+        err_console.print(f"[red]Invalid --transport:[/] {exc}")
+        raise typer.Exit(code=2)
 
     scan_id = str(uuid.uuid4())
     started_at = datetime.now(UTC)
@@ -172,7 +231,7 @@ def scan(
     try:
         project_ids = scope_resolver.resolve_projects(
             organization_id=org,
-            project_ids=list(project or []),
+            project_ids=list(project_ids_input),
             exclude_project_ids=list(exclude_project or []),
         )
     except Exception as exc:
@@ -184,6 +243,8 @@ def scan(
         raise typer.Exit(code=0)
 
     console.print(f"[green]Scope resolved:[/] {len(project_ids)} project(s)")
+    _timeout_label = "no timeout" if request_timeout == 0 else f"{request_timeout or 30:g}s"
+    console.print(f"[dim]Transport: {selected_transport} (timeout {_timeout_label})[/]")
 
     if dry_run:
         console.print("[yellow]Dry run — listing checks only:[/]")
@@ -202,6 +263,11 @@ def scan(
     # Load allowlist (validated before the slow collection phase)
     allowlist: list[dict] = []
     if allowlist_file:
+        if allowlist_file.is_dir():
+            err_console.print(
+                f"[red]Invalid allowlist:[/] {allowlist_file} is a directory, expected a YAML file."
+            )
+            raise typer.Exit(code=1)
         if allowlist_file.exists():
             from gcp_abuse_scanner.scoring.engine import load_allowlist
 
@@ -209,6 +275,9 @@ def scan(
                 allowlist = load_allowlist(allowlist_file)
             except ValueError as exc:
                 err_console.print(f"[red]Invalid allowlist {allowlist_file}:[/] {exc}")
+                raise typer.Exit(code=1)
+            except OSError as exc:
+                err_console.print(f"[red]Cannot read allowlist {allowlist_file}:[/] {exc}")
                 raise typer.Exit(code=1)
         else:
             err_console.print(
@@ -223,7 +292,12 @@ def scan(
     cache = InventoryCache(ttl_seconds=cache_ttl) if use_cache else None
     if cache and cache.is_valid(project_ids, org):
         console.print("[dim]Using cached inventory (--cache)[/]")
-    collector_engine = CollectorEngine(auth_manager=auth, cache=cache)
+    collector_engine = CollectorEngine(
+        auth_manager=auth,
+        cache=cache,
+        timeout=request_timeout,
+        transport=selected_transport,
+    )
     inventory = collector_engine.collect(project_ids=project_ids, organization_id=org)
 
     # Run checks
@@ -237,6 +311,8 @@ def scan(
 
     all_findings = []
     checks_executed = checks_passed = checks_failed = checks_na = checks_errored = 0
+    not_applicable_ids: list[str] = []
+    errored_ids: list[str] = []
 
     for check in checks:
         checks_executed += 1
@@ -244,6 +320,7 @@ def scan(
             findings = check.safe_evaluate(inventory)
             if not check.is_applicable(inventory):
                 checks_na += 1
+                not_applicable_ids.append(check.check_id)
             elif findings:
                 checks_failed += 1
                 all_findings.extend(findings)
@@ -251,6 +328,7 @@ def scan(
                 checks_passed += 1
         except Exception:
             checks_errored += 1
+            errored_ids.append(check.check_id)
 
     # Score and prioritize
     scoring = ScoringEngine(allowlist=allowlist)
@@ -282,19 +360,38 @@ def scan(
         checks_failed=checks_failed,
         checks_not_applicable=checks_na,
         checks_errored=checks_errored,
+        checks_not_applicable_ids=not_applicable_ids,
+        checks_errored_ids=errored_ids,
         skipped_apis_by_project=inventory.skipped_apis,
+        unreadable_budget_accounts=inventory.budgets_unreadable,
         collector_errors=inventory.collector_errors,
     )
+
+    risk_assessment = assess_risk(all_findings, coverage)
 
     report = ScanReport(
         metadata=metadata,
         executive_summary=executive_summary,
         coverage=coverage,
         findings=all_findings,
+        risk_assessment=risk_assessment,
     )
 
     # Output
     _write_output(report, format, output)
+
+    # Risk level (SOP 1–4) and the coverage gate — see docs/risk-model.md
+    console.print(
+        f"\n[bold]Risk level: {risk_assessment.level}/4 ({risk_assessment.label})[/] — "
+        + (
+            "[green]coverage complete, auto-approval eligible[/]"
+            if risk_assessment.auto_approval_eligible
+            else "[yellow]not auto-approvable[/]"
+        )
+    )
+    if risk_assessment.auto_approval_blockers:
+        for blocker in risk_assessment.auto_approval_blockers:
+            console.print(f"  [yellow]•[/] {blocker}")
 
     # Exit code: non-zero if CRITICAL findings
     critical_count = executive_summary.by_severity.critical
@@ -306,17 +403,17 @@ def scan(
 
 
 def _write_output(report: ScanReport, format: OutputFormat, output: Path | None) -> None:
-    from gcp_abuse_scanner.reporters import (
-        ConsoleReporter,
-        HTMLReporter,
-        JSONReporter,
-        MarkdownReporter,
-        SARIFReporter,
-    )
 
     scan_prefix = f"gcp-scan-{report.metadata.scan_id[:8]}"
 
-    formats_to_render = (
+    if output is not None:
+        try:
+            output.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            err_console.print(f"[red]Cannot create output directory {output.parent}:[/] {exc}")
+            raise typer.Exit(code=1)
+
+    formats_to_render: list[OutputFormat] = (
         [
             OutputFormat.console,
             OutputFormat.json,
@@ -326,6 +423,27 @@ def _write_output(report: ScanReport, format: OutputFormat, output: Path | None)
         ]
         if format == OutputFormat.all
         else [format]
+    )
+
+    try:
+        _render_formats(report, formats_to_render, output, scan_prefix)
+    except OSError as exc:
+        err_console.print(f"[red]Cannot write report to {output}:[/] {exc}")
+        raise typer.Exit(code=1)
+
+
+def _render_formats(
+    report: ScanReport,
+    formats_to_render: list[OutputFormat],
+    output: Path | None,
+    scan_prefix: str,
+) -> None:
+    from gcp_abuse_scanner.reporters import (
+        ConsoleReporter,
+        HTMLReporter,
+        JSONReporter,
+        MarkdownReporter,
+        SARIFReporter,
     )
 
     for fmt in formats_to_render:

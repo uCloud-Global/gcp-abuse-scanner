@@ -166,3 +166,70 @@ class TestLoadAllowlist:
         result = ScoringEngine(allowlist=load_allowlist(path)).process([finding])
         assert result[0].suppressed is True
         assert result[0].suppression_reason == "accepted"
+
+
+class TestPenaltyPoints:
+    """penalty_points is the scope-independent companion of posture_score (docs/risk-model.md)."""
+
+    @staticmethod
+    def _summary(findings: list[Finding], max_projects: int = 1):
+        return ScoringEngine().build_executive_summary(findings, max_projects=max_projects)
+
+    def test_weights_are_severity_based(self) -> None:
+        findings = [
+            _make_finding("CM-004", Severity.CRITICAL),
+            _make_finding("GEM-002", Severity.CRITICAL),
+            _make_finding("CM-001", Severity.HIGH),
+            _make_finding("CM-009", Severity.MEDIUM),
+            _make_finding("CMN-003", Severity.LOW),
+        ]
+        assert self._summary(findings).penalty_points == 10 + 10 + 5 + 2 + 0.5
+
+    def test_no_findings_means_zero_penalty(self) -> None:
+        summary = self._summary([])
+        assert summary.penalty_points == 0.0
+        assert summary.posture_score == 100.0
+
+    def test_suppressed_findings_do_not_penalize(self) -> None:
+        active = _make_finding("CM-004", Severity.CRITICAL)
+        suppressed = _make_finding("GEM-002", Severity.CRITICAL, project_id="other")
+        suppressed.suppressed = True
+        assert self._summary([active, suppressed]).penalty_points == 10.0
+
+    def test_penalty_is_independent_of_scope(self) -> None:
+        """Same findings → same penalty whatever the scope; posture_score differs."""
+        findings = [
+            _make_finding("CM-004", Severity.CRITICAL),
+            _make_finding("CM-001", Severity.HIGH),
+        ]
+
+        one = self._summary(findings, max_projects=1)
+        hundred = self._summary(findings, max_projects=100)
+
+        assert one.penalty_points == hundred.penalty_points == 15.0
+        assert one.posture_score == 0.0  # clamped: 100 - (15/10 × 100) = -50
+        assert hundred.posture_score > one.posture_score
+
+    def test_penalty_still_moves_when_posture_is_already_zero(self) -> None:
+        """The live scan's case: posture 0.0 whether the penalty is 11 or 85."""
+        few = [_make_finding("CM-004", Severity.CRITICAL)]  # penalty 10 → posture 0.0
+        many = [_make_finding("CM-004", Severity.CRITICAL)] + [
+            _make_finding(f"CM-00{i}", Severity.HIGH) for i in range(10)
+        ]
+
+        summary_few = self._summary(few)
+        summary_many = self._summary(many)
+
+        assert summary_few.posture_score == summary_many.posture_score == 0.0
+        assert summary_few.penalty_points == 10.0
+        assert summary_many.penalty_points == 60.0
+
+    def test_fixing_a_finding_lowers_the_penalty_linearly(self) -> None:
+        findings = [
+            _make_finding("CM-004", Severity.CRITICAL),
+            _make_finding("CM-001", Severity.HIGH),
+        ]
+        before = self._summary(findings).penalty_points
+        after = self._summary([findings[1]]).penalty_points
+
+        assert before - after == 10.0  # removing the CRITICAL removes exactly its weight

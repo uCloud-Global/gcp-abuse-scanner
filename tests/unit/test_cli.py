@@ -69,6 +69,10 @@ def _make_mock_report(has_critical: bool = False, finding_count: int = 1):
             )
         )
 
+    # same weights the scoring engine uses, so the mocked summary reflects reality
+    weights = {"CRITICAL": 10, "HIGH": 5, "MEDIUM": 2, "LOW": 0.5, "INFO": 0}
+    penalty = sum(weights[f.severity.value] for f in findings)
+
     return ScanReport(
         metadata=ScanMetadata(
             scan_id="abcd1234-0000-0000-0000-000000000000",
@@ -83,6 +87,7 @@ def _make_mock_report(has_critical: bool = False, finding_count: int = 1):
         ),
         executive_summary=ExecutiveSummary(
             posture_score=50.0,
+            penalty_points=penalty,
             total_findings=finding_count,
             by_severity=SeveritySummary(
                 critical=finding_count if has_critical else 0,
@@ -484,11 +489,44 @@ class TestScanFailFast:
         with (
             patch("gcp_abuse_scanner.auth.AuthManager", return_value=auth),
             patch("gcp_abuse_scanner.auth.ScopeResolver", return_value=mock_scope),
-            patch("gcp_abuse_scanner.collectors.engine.CollectorEngine", return_value=mock_engine),
+            patch("gcp_abuse_scanner.collectors.engine.CollectorEngine") as engine_cls,
             patch("gcp_abuse_scanner.checks.CheckRegistry.all_checks", return_value=[mock_check]),
         ):
+            engine_cls.return_value = mock_engine
             result = runner.invoke(app, ["scan", "--project", "proj-1", *extra_args])
+        # the constructor mock (engine.ctor) exposes the args the CLI passed to CollectorEngine
+        mock_engine.ctor = engine_cls
         return result, mock_engine
+
+    # --transport / --request-timeout ---------------------------------------
+
+    def test_invalid_transport_rejected_before_collection(self):
+        result, engine = self._invoke(["--transport", "carrier-pigeon"])
+        assert result.exit_code == 2
+        assert "Invalid --transport" in result.output
+        engine.collect.assert_not_called()
+
+    def test_valid_transport_is_normalised_and_passed_to_the_engine(self):
+        result, engine = self._invoke(["--transport", " requests ", "--request-timeout", "12"])
+        assert result.exit_code == 0
+        _, kwargs = engine.ctor.call_args
+        assert kwargs["transport"] == "requests"
+        assert kwargs["timeout"] == 12.0
+
+    def test_transport_defaults_to_none_so_the_module_decides(self, monkeypatch):
+        monkeypatch.delenv("GCP_ABUSE_SCANNER_TRANSPORT", raising=False)
+        result, engine = self._invoke([])
+        assert result.exit_code == 0
+        _, kwargs = engine.ctor.call_args
+        assert kwargs["transport"] == "requests"  # resolve_transport's default
+        assert kwargs["timeout"] is None  # → transport.DEFAULT_TIMEOUT
+
+    def test_env_var_transport_is_honoured(self, monkeypatch):
+        monkeypatch.setenv("GCP_ABUSE_SCANNER_TRANSPORT", "httplib2")
+        result, engine = self._invoke([])
+        assert result.exit_code == 0
+        _, kwargs = engine.ctor.call_args
+        assert kwargs["transport"] == "httplib2"
 
     # --vector ---------------------------------------------------------------
 
@@ -581,3 +619,350 @@ class TestScanFailFast:
         result, _ = self._invoke(["--dry-run"], auth=auth)
 
         assert result.exit_code == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Robustness: every edge case a user (or an agent) can hit must fail cleanly
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestScanRobustness:
+    """Bad input at the CLI boundary: no tracebacks, no half-written reports, no fake success."""
+
+    def _run(self, extra_args=None, has_critical=False, project_ids=None, check=None):
+        from types import SimpleNamespace
+
+        report = _make_mock_report(has_critical=has_critical)
+
+        mock_auth = MagicMock()
+        mock_auth.identity = "scanner@proj.iam.gserviceaccount.com"
+
+        mock_scope = MagicMock()
+        mock_scope.resolve_projects.return_value = (
+            ["proj-1"] if project_ids is None else project_ids
+        )
+
+        mock_inventory = MagicMock()
+        mock_inventory.inaccessible_projects = []
+        mock_inventory.skipped_apis = {}
+        mock_inventory.collector_errors = []
+
+        mock_engine = MagicMock()
+        mock_engine.collect.return_value = mock_inventory
+
+        mock_check = MagicMock()
+        mock_check.vector = MagicMock()
+        mock_check.vector.value = "crypto_mining"
+        mock_check.safe_evaluate.return_value = report.findings
+        mock_check.is_applicable.return_value = True
+        mock_check.check_id = "CM-001"
+        if check is not None:
+            mock_check = check
+
+        mock_scoring = MagicMock()
+        mock_scoring.process.return_value = report.findings
+        mock_scoring.build_executive_summary.return_value = report.executive_summary
+
+        with (
+            patch("gcp_abuse_scanner.auth.AuthManager") as auth_cls,
+            patch("gcp_abuse_scanner.auth.ScopeResolver", return_value=mock_scope),
+            patch("gcp_abuse_scanner.collectors.engine.CollectorEngine") as engine_cls,
+            patch("gcp_abuse_scanner.scoring.ScoringEngine", return_value=mock_scoring),
+            patch("gcp_abuse_scanner.checks.CheckRegistry.all_checks", return_value=[mock_check]),
+            patch("gcp_abuse_scanner.checks.CheckRegistry.list_metadata", return_value=[]),
+        ):
+            auth_cls.return_value = mock_auth
+            engine_cls.return_value = mock_engine
+            result = runner.invoke(app, ["scan", "--project", "proj-1", *(extra_args or [])])
+
+        return result, SimpleNamespace(
+            auth=mock_auth,
+            auth_cls=auth_cls,
+            scope=mock_scope,
+            engine=mock_engine,
+            engine_cls=engine_cls,
+        )
+
+    @staticmethod
+    def _clean(result) -> bool:
+        """A clean failure exits with SystemExit, not with a traceback-carrying exception."""
+        return result.exception is None or isinstance(result.exception, SystemExit)
+
+    # ── invalid flag values are usage errors (exit 2), before any work ───────
+
+    def test_negative_request_timeout_is_a_usage_error(self):
+        result, mocks = self._run(["--request-timeout", "-5"])
+        assert result.exit_code == 2
+        assert "--request-timeout must be >= 0" in result.output
+        assert self._clean(result)
+        mocks.engine_cls.assert_not_called()
+
+    def test_negative_cache_ttl_is_a_usage_error(self):
+        result, mocks = self._run(["--cache-ttl", "-1"])
+        assert result.exit_code == 2
+        assert "--cache-ttl must be >= 0" in result.output
+        mocks.engine_cls.assert_not_called()
+
+    def test_non_numeric_org_is_a_usage_error(self):
+        result, mocks = self._run(["--org", "my-org"])
+        assert result.exit_code == 2
+        assert "numeric organization ID" in result.output
+        mocks.scope.resolve_projects.assert_not_called()
+
+    def test_empty_project_id_is_a_usage_error(self):
+        result, mocks = self._run(["--project", ""])
+        assert result.exit_code == 2
+        assert "non-empty project ID" in result.output
+        mocks.scope.resolve_projects.assert_not_called()
+
+    def test_unknown_flag_is_a_usage_error(self):
+        result = runner.invoke(app, ["scan", "--project", "proj-1", "--not-a-flag"])
+        assert result.exit_code == 2
+        assert self._clean(result)
+
+    def test_unknown_command_is_a_usage_error(self):
+        result = runner.invoke(app, ["scan-all"])
+        assert result.exit_code == 2
+        assert self._clean(result)
+
+    def test_dry_run_still_rejects_invalid_flag_values(self):
+        """--dry-run needs no credentials, but it does not excuse a bad value."""
+        result, mocks = self._run(["--dry-run", "--cache-ttl", "-3"])
+        assert result.exit_code == 2
+        assert "--cache-ttl must be >= 0" in result.output
+        mocks.engine_cls.assert_not_called()
+
+    def test_zero_request_timeout_is_accepted(self):
+        result, _ = self._run(["--request-timeout", "0"])
+        assert result.exit_code == 0
+        assert "no timeout" in result.output
+
+    # ── output-path traps ───────────────────────────────────────────────────
+
+    def test_format_all_with_output_warns_that_only_the_last_format_survives(self, tmp_path):
+        out = tmp_path / "everything.json"
+        result, _ = self._run(["--format", "all", "--output", str(out)])
+
+        assert result.exit_code == 0
+        assert "same --output path" in result.output
+        # the file ends up holding the last format rendered (SARIF) — documented, and now warned
+        assert out.exists()
+        assert '"runs"' in out.read_text(encoding="utf-8")
+
+    def test_console_format_with_output_warns_and_writes_no_file(self, tmp_path):
+        out = tmp_path / "report.json"
+        result, _ = self._run(["--format", "console", "--output", str(out)])
+
+        assert result.exit_code == 0
+        assert "--output is ignored for --format console" in result.output
+        assert not out.exists()
+
+    def test_output_creates_missing_parent_directories(self, tmp_path):
+        import json
+
+        out = tmp_path / "nested" / "deep" / "report.json"
+        result, _ = self._run(["--format", "json", "--output", str(out)])
+
+        assert result.exit_code == 0
+        assert out.exists()
+        assert json.loads(out.read_text(encoding="utf-8"))["risk_assessment"]["level"] >= 1
+
+    def test_unwritable_output_path_exits_one_cleanly(self, tmp_path):
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("i am a file")
+
+        result, _ = self._run(["--format", "json", "--output", str(blocker / "report.json")])
+
+        assert result.exit_code == 1
+        assert "Cannot create output directory" in result.output
+        assert self._clean(result)
+
+    # ── allowlist traps ─────────────────────────────────────────────────────
+
+    def test_allowlist_directory_is_rejected_cleanly(self, tmp_path):
+        result, mocks = self._run(["--allowlist", str(tmp_path)])
+
+        assert result.exit_code == 1
+        assert "is a directory" in result.output
+        assert self._clean(result)
+        mocks.engine.collect.assert_not_called()
+
+    def test_unreadable_allowlist_is_rejected_before_collection(self, tmp_path):
+        """Typer already rejects an unreadable existing path (exit 2) — documented behaviour.
+
+        The CLI keeps its own OSError guard for paths that become unreadable after validation
+        (or when the command is driven programmatically), but the user-facing path is this one.
+        """
+        import os
+        import stat
+
+        if os.geteuid() == 0:  # root ignores the mode bits
+            import pytest
+
+            pytest.skip("running as root: file modes are not enforced")
+
+        allowlist = tmp_path / "allowlist.yaml"
+        allowlist.write_text("- check_id: CM-001\n  reason: accepted\n")
+        allowlist.chmod(stat.S_IRUSR & 0o000)
+
+        result, mocks = self._run(["--allowlist", str(allowlist)])
+
+        assert result.exit_code == 2
+        # the rich panel wraps long paths, so compare against flattened output
+        flat = " ".join(result.output.replace("│", " ").split())
+        assert "Invalid value for '--allowlist'" in flat
+        assert "not readable" in flat
+        assert self._clean(result)
+        mocks.engine_cls.assert_not_called()
+
+    # ── scope and report-contract edge cases ────────────────────────────────
+
+    def test_scope_emptied_by_exclusions_exits_zero_with_a_warning(self):
+        result, mocks = self._run(project_ids=[])
+
+        assert result.exit_code == 0
+        assert "No projects found in scope" in result.output
+        mocks.engine_cls.assert_not_called()
+
+    def test_critical_scan_writes_the_report_before_exiting_two(self, tmp_path):
+        import json
+
+        out = tmp_path / "critical.json"
+        result, _ = self._run(["--format", "json", "--output", str(out)], has_critical=True)
+
+        assert result.exit_code == 2
+        assert out.exists(), "the report must exist even on exit 2"
+        risk = json.loads(out.read_text(encoding="utf-8"))["risk_assessment"]
+        assert risk["level"] == 3  # CM-001 CRITICAL is not in the level-4 class
+        assert risk["auto_approval_eligible"] is False
+        assert risk["auto_approval_blockers"]
+
+    def test_usage_error_writes_no_report(self, tmp_path):
+        out = tmp_path / "never.json"
+        result, _ = self._run(["--transport", "bogus", "--format", "json", "--output", str(out)])
+
+        assert result.exit_code == 2
+        assert not out.exists()
+
+    def test_dry_run_writes_no_report_and_builds_no_engine(self, tmp_path):
+        out = tmp_path / "dry.json"
+        result, mocks = self._run(["--dry-run", "--format", "json", "--output", str(out)])
+
+        assert result.exit_code == 0
+        assert not out.exists()
+        mocks.engine_cls.assert_not_called()
+
+    # ── credential plumbing ─────────────────────────────────────────────────
+
+    def test_impersonation_and_key_file_are_both_forwarded_to_auth(self):
+        result, mocks = self._run(
+            [
+                "--service-account-key",
+                "/tmp/key.json",
+                "--impersonate-service-account",
+                "scanner@proj.iam.gserviceaccount.com",
+            ]
+        )
+
+        assert result.exit_code == 0
+        _, kwargs = mocks.auth_cls.call_args
+        assert kwargs["service_account_key"] == "/tmp/key.json"
+        assert kwargs["impersonate_service_account"] == "scanner@proj.iam.gserviceaccount.com"
+
+    # ── paths that feed the coverage gate ───────────────────────────────────
+
+    def test_not_applicable_check_is_recorded_for_the_coverage_gate(self, tmp_path):
+        import json
+
+        check = MagicMock()
+        check.check_id = "GEM-001"
+        check.vector = MagicMock(value="gemini_abuse")
+        check.is_applicable.return_value = False
+        check.safe_evaluate.return_value = []
+
+        out = tmp_path / "na.json"
+        result, _ = self._run(
+            ["--format", "json", "--output", str(out)], project_ids=["proj-1"], check=check
+        )
+
+        assert result.exit_code == 0
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        assert payload["coverage"]["checks_not_applicable_ids"] == ["GEM-001"]
+        assert payload["coverage"]["checks_not_applicable"] == 1
+        # a NOT_APPLICABLE api_keys check means "we could not look" → no auto-approval
+        risk = payload["risk_assessment"]
+        assert risk["coverage_complete"] is False
+        assert risk["auto_approval_eligible"] is False
+        assert [g["domain"] for g in risk["coverage_gaps"]] == ["api_keys"]
+
+    def test_check_that_raises_is_recorded_and_the_scan_continues(self, tmp_path):
+        import json
+
+        check = MagicMock()
+        check.check_id = "CM-004"
+        check.vector = MagicMock(value="crypto_mining")
+        check.is_applicable.side_effect = RuntimeError("boom")
+        check.safe_evaluate.return_value = []
+
+        out = tmp_path / "errored.json"
+        result, _ = self._run(
+            ["--format", "json", "--output", str(out)], project_ids=["proj-1"], check=check
+        )
+
+        assert result.exit_code == 0  # one broken check must not kill the scan ...
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        assert payload["coverage"]["checks_errored_ids"] == ["CM-004"]
+        # ... but it must not read as "passed" either: network coverage is now incomplete
+        risk = payload["risk_assessment"]
+        assert risk["coverage_complete"] is False
+        assert risk["auto_approval_eligible"] is False
+        assert [g["domain"] for g in risk["coverage_gaps"]] == ["network"]
+
+    def test_cache_hit_is_announced(self):
+        mock_cache = MagicMock()
+        mock_cache.is_valid.return_value = True
+
+        with patch("gcp_abuse_scanner.collectors.cache.InventoryCache", return_value=mock_cache):
+            result, _ = self._run(["--cache"])
+
+        assert result.exit_code == 0
+        assert "Using cached inventory" in result.output
+
+    def test_allowlist_read_error_is_reported_cleanly(self, tmp_path):
+        allowlist = tmp_path / "allowlist.yaml"
+        allowlist.write_text("- check_id: CM-001\n  reason: accepted\n")
+
+        with patch(
+            "gcp_abuse_scanner.scoring.engine.load_allowlist",
+            side_effect=OSError("input/output error"),
+        ):
+            result, mocks = self._run(["--allowlist", str(allowlist)])
+
+        assert result.exit_code == 1
+        assert "Cannot read allowlist" in result.output
+        assert self._clean(result)
+        mocks.engine.collect.assert_not_called()
+
+    def test_report_write_failure_exits_one_cleanly(self, tmp_path):
+        out = tmp_path / "report.json"
+
+        with patch(
+            "gcp_abuse_scanner.reporters.JSONReporter.render",
+            side_effect=OSError("no space left on device"),
+        ):
+            result, _ = self._run(["--format", "json", "--output", str(out)])
+
+        assert result.exit_code == 1
+        assert "Cannot write report" in result.output
+        assert self._clean(result)
+
+    def test_report_carries_penalty_points_for_drift_tracking(self, tmp_path):
+        import json
+
+        out = tmp_path / "penalty.json"
+        result, _ = self._run(["--format", "json", "--output", str(out)], has_critical=True)
+
+        assert result.exit_code == 2
+        summary = json.loads(out.read_text(encoding="utf-8"))["executive_summary"]
+        assert summary["penalty_points"] == 10.0  # one CRITICAL
+        assert summary["posture_score"] < 100.0
