@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +12,19 @@ from gcp_abuse_scanner.cli import app
 from gcp_abuse_scanner.models.finding import FindingStatus, Severity
 
 runner = CliRunner()
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _flat(output: str) -> str:
+    """Strip Rich/Click styling and wrapping — CI colourises flag names and box art.
+
+    Without this, assertions on Click's own error messages are terminal-dependent:
+    Rich styles '--allowlist' as 'Invalid value for '\x1b[1;36m--allowlist\x1b[0m'', so
+    the literal substring only exists in some environments (it passed locally, failed
+    on GitHub Actions).
+    """
+    return " ".join(_ANSI.sub("", output.replace("│", " ")).split())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -808,8 +822,8 @@ class TestScanRobustness:
         result, mocks = self._run(["--allowlist", str(allowlist)])
 
         assert result.exit_code == 2
-        # the rich panel wraps long paths, so compare against flattened output
-        flat = " ".join(result.output.replace("│", " ").split())
+        # the rich panel wraps long paths and may style the flag name — compare flat text
+        flat = _flat(result.output)
         assert "Invalid value for '--allowlist'" in flat
         assert "not readable" in flat
         assert self._clean(result)
