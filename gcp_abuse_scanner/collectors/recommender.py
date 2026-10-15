@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from gcp_abuse_scanner.collectors.base import BaseCollector, _fmt_exc
+from gcp_abuse_scanner.collectors.base import BaseCollector
 from gcp_abuse_scanner.models.inventory import ResourceInventory
 
 if TYPE_CHECKING:
@@ -39,14 +39,8 @@ class RecommenderCollector(BaseCollector):
         project_ids: list[str],
         organization_id: str | None = None,
     ) -> None:
-        creds = self._auth.get_credentials()
-
-        try:
-            import googleapiclient.discovery
-
-            recommender = googleapiclient.discovery.build("recommender", "v1", credentials=creds)
-        except Exception as exc:
-            logger.error("Failed to build Recommender client: %s", _fmt_exc(exc))
+        recommender = self.build_client(inventory, "recommender", "v1")
+        if recommender is None:
             return
 
         # Initialize recommender_insights on inventory if not present
@@ -55,9 +49,7 @@ class RecommenderCollector(BaseCollector):
 
         for project_id in project_ids:
             if not self.is_api_enabled(inventory, project_id):
-                inventory.skipped_apis.setdefault(project_id, []).append(
-                    "recommender.googleapis.com"
-                )
+                self.record_skipped_api(inventory, project_id, "recommender.googleapis.com")
                 continue
             for location in _RECOMMENDER_LOCATIONS:
                 try:
@@ -77,9 +69,7 @@ class RecommenderCollector(BaseCollector):
         project_id: str,
         location: str,
     ) -> None:
-        parent = (
-            f"projects/{project_id}/locations/{location}/recommenders/{_IAM_RECOMMENDER_ID}"
-        )
+        parent = f"projects/{project_id}/locations/{location}/recommenders/{_IAM_RECOMMENDER_ID}"
         try:
             request = (
                 recommender.projects()  # type: ignore

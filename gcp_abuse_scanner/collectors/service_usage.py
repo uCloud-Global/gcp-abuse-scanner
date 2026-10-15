@@ -46,7 +46,10 @@ class ServiceUsageCollector(BaseCollector):
                         )
                     )
             except Exception as exc:
-                logger.warning(
-                    "ServiceUsage collection failed for %s: %s", project_id, _fmt_exc(exc)
-                )
+                fmt = _fmt_exc(exc)
+                logger.warning("ServiceUsage collection failed for %s: %s", project_id, fmt)
+                # Every other collector gates on this data: without it they skip the project
+                # and the checks behind them report nothing. Record both the project and the
+                # API so the coverage gate sees it.
                 inventory.inaccessible_projects.append(project_id)
+                self.record_skipped_api(inventory, project_id, "serviceusage.googleapis.com", fmt)

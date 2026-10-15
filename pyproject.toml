@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gcp-abuse-scanner"
-version = "0.1.5"
+version = "0.1.6"
 description = "Preventive GCP security scanner for crypto mining and Gemini API abuse vectors"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -40,6 +40,10 @@ dependencies = [
     "google-cloud-billing>=1.13.0",
     "google-cloud-monitoring>=2.21.0",
     "google-auth>=2.29.0",
+    # HTTP transport for the discovery-based collectors and the IAM-collector
+    # asset client (see gcp_abuse_scanner/utils/transport.py)
+    "requests>=2.31.0",
+    "google-auth-httplib2>=0.2.0",
     # Data models
     "pydantic>=2.7.0",
     "pydantic-settings>=2.3.0",
@@ -69,10 +73,10 @@ dev = [
 gcp-abuse-scanner = "gcp_abuse_scanner.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/lmoreno0435/gcp-abuse-scanner"
-Repository = "https://github.com/lmoreno0435/gcp-abuse-scanner"
-Issues = "https://github.com/lmoreno0435/gcp-abuse-scanner/issues"
-Documentation = "https://github.com/lmoreno0435/gcp-abuse-scanner/tree/main/docs"
+Homepage = "https://github.com/uCloud-Global/gcp-abuse-scanner"
+Repository = "https://github.com/uCloud-Global/gcp-abuse-scanner"
+Issues = "https://github.com/uCloud-Global/gcp-abuse-scanner/issues"
+Documentation = "https://github.com/uCloud-Global/gcp-abuse-scanner/tree/main/docs"
 
 [tool.hatch.build.targets.wheel]
 packages = ["gcp_abuse_scanner"]

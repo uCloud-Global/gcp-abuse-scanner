@@ -60,9 +60,47 @@ class BaseCollector(abc.ABC):
     name: str  # e.g. "compute", "iam"
     required_apis: list[str] = []
 
-    def __init__(self, auth_manager: AuthManager) -> None:
+    def __init__(
+        self,
+        auth_manager: AuthManager,
+        timeout: float | None = None,
+        transport: str | None = None,
+    ) -> None:
         self._auth = auth_manager
+        self._timeout = timeout
+        self._transport = transport
         self._logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+
+    def build_client(
+        self,
+        inventory: ResourceInventory,
+        api: str,
+        version: str,
+    ) -> Any | None:
+        """Build a discovery client, recording a coverage gap if that fails.
+
+        The client libraries fail open, but a client that could not be built means
+        *no data at all* for the checks behind it. Returning ``None`` silently
+        would turn a transport failure into "no findings", so the failure is
+        recorded in ``inventory.collector_errors`` — which the coverage gate in
+        ``scoring/risk.py`` reads (see docs/risk-model.md).
+        """
+        from gcp_abuse_scanner.utils import transport as transport_module
+
+        try:
+            return transport_module.build_service(
+                api,
+                version,
+                credentials=self._auth.get_credentials(),
+                timeout=self._timeout,
+                transport=self._transport,
+            )
+        except Exception as exc:
+            fmt = _fmt_exc(exc)
+            message = f"{api}/{version} client unavailable: {fmt}"
+            logger.error("%s collector: %s", self.name, message)
+            self.record_collector_error(inventory, None, message)
+            return None
 
     @abc.abstractmethod
     def collect(
@@ -83,6 +121,42 @@ class BaseCollector(abc.ABC):
             api.service_name for api in inventory.enabled_apis if api.project_id == project_id
         }
         return any(api in enabled for api in self.required_apis)
+
+    def record_skipped_api(
+        self,
+        inventory: ResourceInventory,
+        project_id: str,
+        api: str,
+        reason: str = "",
+    ) -> None:
+        """
+        Record that an API could not be read for a project.
+
+        Collectors fail open, but "no data" must never be reported as "no
+        findings": every skip lands in ``inventory.skipped_apis`` and blocks
+        automatic approval of the assessment (see docs/risk-model.md).
+        """
+        skipped = inventory.skipped_apis.setdefault(project_id, [])
+        if api not in skipped:
+            skipped.append(api)
+        if reason:
+            logger.debug("Skipped %s for %s: %s", api, project_id, reason)
+
+    def record_collector_error(
+        self,
+        inventory: ResourceInventory,
+        project_id: str | None,
+        error: str,
+    ) -> None:
+        """Record a collector failure attributed to this collector (and project).
+
+        ``project_id`` is ``None`` for failures that are not tied to a single
+        project (a client that could not be built, a credential problem).
+        """
+        entry: dict[str, str] = {"collector": self.name, "error": error}
+        if project_id:
+            entry["project_id"] = project_id
+        inventory.collector_errors.append(entry)
 
     @staticmethod
     @retry(

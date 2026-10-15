@@ -24,19 +24,13 @@ class GKECollector(BaseCollector):
         project_ids: list[str],
         organization_id: str | None = None,
     ) -> None:
-        creds = self._auth.get_credentials()
-
-        try:
-            import googleapiclient.discovery
-
-            container = googleapiclient.discovery.build("container", "v1", credentials=creds)
-        except Exception as exc:
-            logger.error("Failed to build GKE client: %s", _fmt_exc(exc))
+        container = self.build_client(inventory, "container", "v1")
+        if container is None:
             return
 
         for project_id in project_ids:
             if not self.is_api_enabled(inventory, project_id):
-                inventory.skipped_apis.setdefault(project_id, []).append("container.googleapis.com")
+                self.record_skipped_api(inventory, project_id, "container.googleapis.com")
                 continue
             try:
                 # list clusters across all locations using '-'

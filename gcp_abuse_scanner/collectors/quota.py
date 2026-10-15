@@ -1,4 +1,4 @@
-"""Quota collector — reads service quotas for Vertex AI and Compute Engine."""
+"""Quota collector — reads service quotas for Vertex AI, Gemini API and Compute Engine."""
 
 from __future__ import annotations
 
@@ -14,7 +14,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Quotas we care about for abuse detection
-# Format: (service, metric_name, description)
+# Format: (service, metric_name_pattern, description)
+# An empty pattern matches every metric of the service — used for services whose
+# metric names are not stable (the Generative Language / Gemini API quota ids
+# differ between free and paid tiers and change over time).
 _QUOTA_TARGETS: list[tuple[str, str, str]] = [
     # Vertex AI / Gemini
     (
@@ -26,6 +29,13 @@ _QUOTA_TARGETS: list[tuple[str, str, str]] = [
         "aiplatform.googleapis.com",
         "generate_content_requests_per_minute_per_project_per_base_model",
         "Gemini generateContent RPM",
+    ),
+    # Gemini API (AI Studio / Generative Language) — the service that API keys with
+    # Gemini access target. Vertex AI quotas say nothing about this surface.
+    (
+        "generativelanguage.googleapis.com",
+        "",
+        "Gemini API (Generative Language) quota limits",
     ),
     # Compute Engine (for crypto mining scale)
     (
@@ -64,27 +74,21 @@ class QuotaCollector(BaseCollector):
         project_ids: list[str],
         organization_id: str | None = None,
     ) -> None:
-        creds = self._auth.get_credentials()
-
         # Initialize quota_info on inventory if not present
         if not hasattr(inventory, "quota_info"):
             object.__setattr__(inventory, "quota_info", [])
 
-        try:
-            import googleapiclient.discovery
-
-            serviceusage = googleapiclient.discovery.build(
-                "serviceusage", "v1beta1", credentials=creds
-            )
-        except Exception as exc:
-            logger.error("Failed to build Service Usage client for quotas: %s", _fmt_exc(exc))
+        serviceusage = self.build_client(inventory, "serviceusage", "v1beta1")
+        if serviceusage is None:
             return
 
         for project_id in project_ids:
             try:
                 self._collect_project_quotas(serviceusage, inventory, project_id)
             except Exception as exc:
-                logger.debug("Quota collection failed for %s: %s", project_id, exc)
+                fmt = _fmt_exc(exc)
+                logger.debug("Quota collection failed for %s: %s", project_id, fmt)
+                self.record_skipped_api(inventory, project_id, "serviceusage.googleapis.com", fmt)
 
     def _collect_project_quotas(
         self,
@@ -120,7 +124,7 @@ class QuotaCollector(BaseCollector):
                     relevant = [
                         (svc, m, desc)
                         for svc, m, desc in _QUOTA_TARGETS
-                        if svc == service_name and m in metric_name
+                        if svc == service_name and (not m or m in metric_name)
                     ]
                     if not relevant:
                         continue
@@ -138,4 +142,6 @@ class QuotaCollector(BaseCollector):
                         inventory.quota_info.append(quota_entry)  # type: ignore[attr-defined]
 
             except Exception as exc:
-                logger.debug("Quota fetch failed for %s/%s: %s", project_id, service_name, exc)
+                fmt = _fmt_exc(exc)
+                logger.debug("Quota fetch failed for %s/%s: %s", project_id, service_name, fmt)
+                self.record_skipped_api(inventory, project_id, service_name, fmt)

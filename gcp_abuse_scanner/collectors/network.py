@@ -24,18 +24,15 @@ class NetworkCollector(BaseCollector):
         project_ids: list[str],
         organization_id: str | None = None,
     ) -> None:
-        creds = self._auth.get_credentials()
-
-        try:
-            import googleapiclient.discovery
-
-            compute = googleapiclient.discovery.build("compute", "v1", credentials=creds)
-        except Exception as exc:
-            logger.error("Failed to build Compute client for network: %s", _fmt_exc(exc))
+        compute = self.build_client(inventory, "compute", "v1")
+        if compute is None:
             return
 
         for project_id in project_ids:
             if not self.is_api_enabled(inventory, project_id):
+                # No Compute API → no firewall rules → CM-003/CM-004/CM-008/CM-050
+                # would silently "pass". Record the gap instead.
+                self.record_skipped_api(inventory, project_id, "compute.googleapis.com")
                 continue
             try:
                 request = compute.firewalls().list(project=project_id)  # type: ignore
@@ -61,4 +58,6 @@ class NetworkCollector(BaseCollector):
                         previous_request=request, previous_response=response
                     )
             except Exception as exc:
-                logger.warning("Network collection failed for %s: %s", project_id, _fmt_exc(exc))
+                fmt = _fmt_exc(exc)
+                logger.warning("Network collection failed for %s: %s", project_id, fmt)
+                self.record_collector_error(inventory, project_id, fmt)

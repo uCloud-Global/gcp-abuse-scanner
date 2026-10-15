@@ -147,6 +147,13 @@ class ResourceInventory(BaseModel):
     api_keys: list[APIKey] = Field(default_factory=list)
     enabled_apis: list[EnabledAPI] = Field(default_factory=list)
     budgets: list[BudgetInfo] = Field(default_factory=list)
+    budgets_unreadable: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Billing account IDs whose budgets could not be read (API disabled, 403). "
+            "The budget checks must not assert 'no budget' for these accounts."
+        ),
+    )
     org_policies: list[OrgPolicy] = Field(default_factory=list)
     vertex_ai_endpoints: list[VertexAIEndpoint] = Field(default_factory=list)
 

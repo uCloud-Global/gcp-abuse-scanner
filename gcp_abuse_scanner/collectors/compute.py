@@ -24,19 +24,13 @@ class ComputeCollector(BaseCollector):
         project_ids: list[str],
         organization_id: str | None = None,
     ) -> None:
-        creds = self._auth.get_credentials()
-
-        try:
-            import googleapiclient.discovery
-
-            compute = googleapiclient.discovery.build("compute", "v1", credentials=creds)
-        except Exception as exc:
-            logger.error("Failed to build Compute client: %s", _fmt_exc(exc))
+        compute = self.build_client(inventory, "compute", "v1")
+        if compute is None:
             return
 
         for project_id in project_ids:
             if not self.is_api_enabled(inventory, project_id):
-                inventory.skipped_apis.setdefault(project_id, []).append("compute.googleapis.com")
+                self.record_skipped_api(inventory, project_id, "compute.googleapis.com")
                 continue
             try:
                 self._collect_instances(compute, inventory, project_id)

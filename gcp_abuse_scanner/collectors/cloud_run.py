@@ -24,19 +24,13 @@ class CloudRunCollector(BaseCollector):
         project_ids: list[str],
         organization_id: str | None = None,
     ) -> None:
-        creds = self._auth.get_credentials()
-
-        try:
-            import googleapiclient.discovery
-
-            run = googleapiclient.discovery.build("run", "v2", credentials=creds)
-        except Exception as exc:
-            logger.error("Failed to build Cloud Run client: %s", _fmt_exc(exc))
+        run = self.build_client(inventory, "run", "v2")
+        if run is None:
             return
 
         for project_id in project_ids:
             if not self.is_api_enabled(inventory, project_id):
-                inventory.skipped_apis.setdefault(project_id, []).append("run.googleapis.com")
+                self.record_skipped_api(inventory, project_id, "run.googleapis.com")
                 continue
             try:
                 self._collect_services(run, inventory, project_id)

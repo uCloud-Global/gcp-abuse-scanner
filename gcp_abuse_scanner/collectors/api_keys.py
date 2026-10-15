@@ -24,14 +24,8 @@ class APIKeysCollector(BaseCollector):
         project_ids: list[str],
         organization_id: str | None = None,
     ) -> None:
-        creds = self._auth.get_credentials()
-
-        try:
-            import googleapiclient.discovery
-
-            apikeys = googleapiclient.discovery.build("apikeys", "v2", credentials=creds)
-        except Exception as exc:
-            logger.error("Failed to build API Keys client: %s", _fmt_exc(exc))
+        apikeys = self.build_client(inventory, "apikeys", "v2")
+        if apikeys is None:
             return
 
         for project_id in project_ids:
@@ -66,12 +60,16 @@ class APIKeysCollector(BaseCollector):
             except Exception as exc:
                 fmt = _fmt_exc(exc)
                 # 403/404 usually means the API Keys API is not enabled — not an error worth
-                # surfacing loudly; the checks will simply find nothing for this project.
+                # surfacing loudly. It IS a coverage gap though: without it the scan cannot
+                # tell "no keys" from "could not read the keys", so record it in the inventory
+                # (docs/risk-model.md — incomplete coverage blocks automatic approval).
                 if "HTTP 403" in fmt or "HTTP 404" in fmt:
                     logger.debug(
                         "API Keys collection skipped for %s (API not enabled or no permission): %s",
                         project_id,
                         fmt,
                     )
+                    self.record_skipped_api(inventory, project_id, "apikeys.googleapis.com", fmt)
                 else:
                     logger.warning("API Keys collection failed for %s: %s", project_id, fmt)
+                    self.record_collector_error(inventory, project_id, fmt)

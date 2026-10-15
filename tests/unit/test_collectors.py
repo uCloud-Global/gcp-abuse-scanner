@@ -89,7 +89,9 @@ class TestGKECollector:
             collector.collect(inv, ["proj-1"])
 
         assert len(inv.gke_clusters) == 0
-        assert "container.googleapis.com" in inv.skipped_apis.get("proj-1", [])  # lgtm[py/incomplete-url-substring-sanitization]
+        assert "container.googleapis.com" in inv.skipped_apis.get(
+            "proj-1", []
+        )  # lgtm[py/incomplete-url-substring-sanitization]
 
     def test_handles_api_error_gracefully(self):
         from gcp_abuse_scanner.collectors.gke import GKECollector
@@ -204,7 +206,9 @@ class TestCloudRunCollector:
             collector.collect(inv, ["proj-1"])
 
         assert len(inv.cloud_run_services) == 0
-        assert "run.googleapis.com" in inv.skipped_apis.get("proj-1", [])  # lgtm[py/incomplete-url-substring-sanitization]
+        assert "run.googleapis.com" in inv.skipped_apis.get(
+            "proj-1", []
+        )  # lgtm[py/incomplete-url-substring-sanitization]
 
     def test_handles_error_gracefully(self):
         from gcp_abuse_scanner.collectors.cloud_run import CloudRunCollector
@@ -279,7 +283,172 @@ class TestVertexAICollector:
             collector.collect(inv, ["proj-1"])
 
         assert len(inv.vertex_ai_endpoints) == 0
-        assert "aiplatform.googleapis.com" in inv.skipped_apis.get("proj-1", [])  # lgtm[py/incomplete-url-substring-sanitization]
+        assert "aiplatform.googleapis.com" in inv.skipped_apis.get(
+            "proj-1", []
+        )  # lgtm[py/incomplete-url-substring-sanitization]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NetworkCollector
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestNetworkCollector:
+    def test_collects_firewall_rules(self):
+        from gcp_abuse_scanner.collectors.network import NetworkCollector
+
+        inv = _inventory_with_apis("compute.googleapis.com")
+        rule = {
+            "name": "allow-ssh",
+            "network": "https://www.googleapis.com/compute/v1/projects/proj-1/global/networks/default",
+            "direction": "INGRESS",
+            "priority": 1000,
+            "sourceRanges": ["0.0.0.0/0"],
+            "allowed": [{"IPProtocol": "tcp", "ports": ["22"]}],
+        }
+        with patch("googleapiclient.discovery.build") as mock_build:
+            mock_compute = MagicMock()
+            mock_build.return_value = mock_compute
+            mock_compute.firewalls().list().execute.return_value = {"items": [rule]}
+            mock_compute.firewalls().list_next.return_value = None
+
+            NetworkCollector(_make_auth()).collect(inv, ["proj-1"])
+
+        assert len(inv.firewall_rules) == 1
+        assert inv.firewall_rules[0].network == "default"  # self-link trimmed
+        assert inv.skipped_apis == {}
+
+    def test_records_a_coverage_gap_when_api_not_enabled(self):
+        """No Compute API → no firewall rules → CM-003/004/008/050 must not read as PASS."""
+        from gcp_abuse_scanner.collectors.network import NetworkCollector
+
+        inv = _inventory_with_apis("serviceusage.googleapis.com")
+        with patch("googleapiclient.discovery.build"):
+            NetworkCollector(_make_auth()).collect(inv, ["proj-1"])
+
+        assert inv.firewall_rules == []
+        assert "compute.googleapis.com" in inv.skipped_apis.get("proj-1", [])
+
+    def test_records_a_collector_error_on_api_failure(self):
+        from gcp_abuse_scanner.collectors.network import NetworkCollector
+
+        inv = _inventory_with_apis("compute.googleapis.com")
+        with patch("googleapiclient.discovery.build") as mock_build:
+            mock_build.return_value.firewalls().list().execute.side_effect = RuntimeError(
+                "HTTP 500: backend error"
+            )
+            NetworkCollector(_make_auth()).collect(inv, ["proj-1"])
+
+        assert [e["collector"] for e in inv.collector_errors] == ["network"]
+        assert inv.collector_errors[0]["project_id"] == "proj-1"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IAMCollector
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestIAMCollector:
+    def test_sa_collection_failure_is_recorded_as_a_coverage_gap(self):
+        """A failed SA listing hides CM-041/CMN-004 — it must not pass silently."""
+        from gcp_abuse_scanner.collectors.iam import IAMCollector
+
+        inv = ResourceInventory(project_ids=["proj-1"])
+        with (
+            patch("gcp_abuse_scanner.collectors.iam.asset_v1.AssetServiceClient") as asset_cls,
+            patch("googleapiclient.discovery.build") as mock_build,
+        ):
+            asset_cls.return_value.search_all_iam_policies.return_value = []
+            mock_build.return_value.projects().serviceAccounts().list().execute.side_effect = (
+                RuntimeError("HTTP 403: permission denied")
+            )
+
+            IAMCollector(_make_auth()).collect(inv, ["proj-1"])
+
+        assert inv.service_accounts == []
+        assert "iam.googleapis.com" in inv.skipped_apis.get("proj-1", [])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BillingCollector
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+_BA = "015EC6-4BFF3F-9DC247"
+
+
+def _billing_build(api, version, **kwargs):
+    """cloudbilling and billingbudgets clients, mocked per API name."""
+    if api == "cloudbilling":
+        client = MagicMock()
+        client.projects().getBillingInfo().execute.return_value = {
+            "billingAccountName": f"billingAccounts/{_BA}"
+        }
+        return client
+    client = MagicMock()
+    client.billingAccounts().budgets().list().execute.return_value = {
+        "budgets": [
+            {
+                "name": f"billingAccounts/{_BA}/budgets/b1",
+                "displayName": "Monthly",
+                "amount": {"specifiedAmount": {"units": "100"}},
+                "thresholdRules": [{"thresholdPercent": 0.9}],
+            }
+        ]
+    }
+    client.billingAccounts().budgets().list_next.return_value = None
+    return client
+
+
+class TestBillingCollector:
+    def test_collects_budgets_and_links_the_project(self):
+        from gcp_abuse_scanner.collectors.billing import BillingCollector
+
+        inv = _inventory_with_apis("cloudbilling.googleapis.com", "billingbudgets.googleapis.com")
+        with patch("googleapiclient.discovery.build", side_effect=_billing_build):
+            BillingCollector(_make_auth()).collect(inv, ["proj-1"])
+
+        assert [b.billing_account_id for b in inv.budgets] == [_BA]
+        assert inv.budgets_unreadable == []
+        assert inv.projects[0].billing_account_id == _BA
+        assert inv.collector_errors == []
+
+    def test_budget_api_disabled_is_recorded_as_a_coverage_gap(self):
+        """A 403 on the budgets API must not turn into 'the account has no budget'."""
+        from gcp_abuse_scanner.collectors.billing import BillingCollector
+
+        def _failing_build(api, version, **kwargs):
+            client = _billing_build(api, version, **kwargs)
+            if api == "billingbudgets":
+                client.billingAccounts().budgets().list().execute.side_effect = RuntimeError(
+                    "HTTP 403: Cloud Billing Budget API has not been used in project x before "
+                    "or it is disabled"
+                )
+            return client
+
+        inv = _inventory_with_apis("cloudbilling.googleapis.com", "billingbudgets.googleapis.com")
+        with patch("googleapiclient.discovery.build", side_effect=_failing_build):
+            BillingCollector(_make_auth()).collect(inv, ["proj-1"])
+
+        assert inv.budgets == []
+        assert inv.budgets_unreadable == [_BA]
+        assert [e["collector"] for e in inv.collector_errors] == ["billing"]
+        assert _BA in inv.collector_errors[0]["error"]
+
+    def test_the_same_account_is_recorded_once(self):
+        from gcp_abuse_scanner.collectors.billing import BillingCollector
+
+        def _failing_build(api, version, **kwargs):
+            client = _billing_build(api, version, **kwargs)
+            if api == "billingbudgets":
+                client.billingAccounts().budgets().list().execute.side_effect = RuntimeError("boom")
+            return client
+
+        inv = _inventory_with_apis("cloudbilling.googleapis.com", "billingbudgets.googleapis.com")
+        with patch("googleapiclient.discovery.build", side_effect=_failing_build):
+            BillingCollector(_make_auth()).collect(inv, ["proj-1", "proj-2"])
+
+        assert inv.budgets_unreadable == [_BA]  # both projects share the account
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -421,7 +590,9 @@ class TestRecommenderCollector:
             collector.collect(inv, ["proj-1"])
 
         assert len(inv.recommender_insights) == 0
-        assert "recommender.googleapis.com" in inv.skipped_apis.get("proj-1", [])  # lgtm[py/incomplete-url-substring-sanitization]
+        assert "recommender.googleapis.com" in inv.skipped_apis.get(
+            "proj-1", []
+        )  # lgtm[py/incomplete-url-substring-sanitization]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -430,67 +601,116 @@ class TestRecommenderCollector:
 
 
 class TestQuotaCollector:
-    def test_collects_quota_info(self):
+    @staticmethod
+    def _metrics_by_service() -> dict[str, dict]:
+        """Per-service responses — the real API only returns its own metrics."""
+        return {
+            "aiplatform.googleapis.com": {
+                "metrics": [
+                    {
+                        "metric": "aiplatform.googleapis.com/online_prediction_requests_per_base_model_per_minute_per_project",
+                        "consumerQuotaLimits": [
+                            {
+                                "name": "projects/proj-1/services/aiplatform.googleapis.com/consumerQuotaMetrics/online_prediction_requests_per_base_model_per_minute_per_project/limits/%2Fmin%2Fproject%2Fbase_model",
+                                "unit": "1/min/{project}/{base_model}",
+                                "isPrecise": True,
+                                "quotaBuckets": [
+                                    {
+                                        "effectiveLimit": "60",
+                                        "defaultLimit": "60",
+                                        "dimensions": {},
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+            "generativelanguage.googleapis.com": {
+                "metrics": [
+                    {
+                        "metric": "generativelanguage.googleapis.com/generate_content_requests",
+                        "consumerQuotaLimits": [
+                            {
+                                "name": "projects/proj-1/services/generativelanguage.googleapis.com/consumerQuotaMetrics/generate_content_requests/limits/%2Fmin%2Fproject",
+                                "unit": "1/min/{project}",
+                                "quotaBuckets": [
+                                    {"effectiveLimit": "4000", "defaultLimit": "4000"}
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        # Not a target metric for any other service — only the
+                        # generativelanguage wildcard target picks it up.
+                        "metric": "generativelanguage.googleapis.com/embed_content_requests",
+                        "consumerQuotaLimits": [
+                            {
+                                "name": "projects/proj-1/services/generativelanguage.googleapis.com/consumerQuotaMetrics/embed_content_requests/limits/%2Fmin%2Fproject",
+                                "unit": "1/min/{project}",
+                                "quotaBuckets": [
+                                    {"effectiveLimit": "3000", "defaultLimit": "3000"}
+                                ],
+                            }
+                        ],
+                    },
+                ]
+            },
+        }
+
+    def _collect(self, inv, project_id: str = "proj-1"):
         from gcp_abuse_scanner.collectors.quota import QuotaCollector
 
+        responses = self._metrics_by_service()
+
+        def _list(parent: str, **kwargs: object):
+            service = parent.rsplit("/services/", 1)[-1]
+            mock_request = MagicMock()
+            mock_request.execute.return_value = responses.get(service, {"metrics": []})
+            return mock_request
+
+        with patch("googleapiclient.discovery.build") as mock_build:
+            mock_su = MagicMock()
+            mock_build.return_value = mock_su
+            mock_su.services().consumerQuotaMetrics().list.side_effect = _list
+
+            QuotaCollector(_make_auth()).collect(inv, [project_id])
+
+    def test_collects_vertex_ai_quota_info(self):
         inv = _inventory_with_apis(
             "serviceusage.googleapis.com",
             "aiplatform.googleapis.com",
             "compute.googleapis.com",
         )
-        auth = _make_auth()
+        self._collect(inv)
 
-        mock_metrics_response = {
-            "metrics": [
-                {
-                    "metric": "aiplatform.googleapis.com/online_prediction_requests_per_base_model_per_minute_per_project",
-                    "consumerQuotaLimits": [
-                        {
-                            "name": "projects/proj-1/services/aiplatform.googleapis.com/consumerQuotaMetrics/online_prediction_requests_per_base_model_per_minute_per_project/limits/%2Fmin%2Fproject%2Fbase_model",
-                            "unit": "1/min/{project}/{base_model}",
-                            "isPrecise": True,
-                            "quotaBuckets": [
-                                {
-                                    "effectiveLimit": "60",
-                                    "defaultLimit": "60",
-                                    "dimensions": {},
-                                }
-                            ],
-                        }
-                    ],
-                }
-            ]
+        entries = [e for e in inv.quota_info if e["service"] == "aiplatform.googleapis.com"]
+        assert len(entries) == 1
+        assert entries[0]["project_id"] == "proj-1"
+        assert entries[0]["quota_buckets"][0]["effectiveLimit"] == "60"
+
+    def test_collects_gemini_api_quota_metrics(self):
+        """The Generative Language service is a quota target on its own."""
+        inv = _inventory_with_apis(
+            "serviceusage.googleapis.com",
+            "generativelanguage.googleapis.com",
+        )
+        self._collect(inv)
+
+        metrics = {
+            e["metric"]
+            for e in inv.quota_info
+            if e["service"] == "generativelanguage.googleapis.com"
+        }
+        assert metrics == {
+            "generativelanguage.googleapis.com/generate_content_requests",
+            "generativelanguage.googleapis.com/embed_content_requests",
         }
 
-        with patch("googleapiclient.discovery.build") as mock_build:
-            mock_su = MagicMock()
-            mock_build.return_value = mock_su
-
-            mock_su.services().consumerQuotaMetrics().list().execute.return_value = (
-                mock_metrics_response
-            )
-
-            collector = QuotaCollector(auth)
-            collector.collect(inv, ["proj-1"])
-
-        assert len(inv.quota_info) >= 1
-        entry = inv.quota_info[0]
-        assert entry["project_id"] == "proj-1"
-        assert "aiplatform" in entry["service"]
-
     def test_no_quota_when_service_not_enabled(self):
-        from gcp_abuse_scanner.collectors.quota import QuotaCollector
-
-        # Only serviceusage enabled, not aiplatform or compute
+        # Only serviceusage enabled, not aiplatform, generativelanguage or compute
         inv = _inventory_with_apis("serviceusage.googleapis.com")
-        auth = _make_auth()
-
-        with patch("googleapiclient.discovery.build") as mock_build:
-            mock_su = MagicMock()
-            mock_build.return_value = mock_su
-
-            collector = QuotaCollector(auth)
-            collector.collect(inv, ["proj-1"])
+        self._collect(inv)
 
         # No quotas collected because target services not enabled
         assert len(inv.quota_info) == 0
@@ -597,6 +817,9 @@ class TestAPIKeysCollector:
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert len(warnings) == 0
         assert len(inv.api_keys) == 0
+        # ... but it is a coverage gap: "could not read the keys" != "there are no keys"
+        assert inv.skipped_apis["proj-1"] == ["apikeys.googleapis.com"]
+        assert inv.collector_errors == []
 
     def test_non_403_error_is_warning(self, caplog):
         """Unexpected errors (e.g. 500) are still logged as WARNING."""
@@ -631,6 +854,10 @@ class TestAPIKeysCollector:
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert len(warnings) == 1
         assert "HTTP 500" in warnings[0].message
+        # an unexpected failure is recorded as a collector error (not as a skipped API)
+        assert inv.skipped_apis == {}
+        assert [e["collector"] for e in inv.collector_errors] == ["api_keys"]
+        assert inv.collector_errors[0]["project_id"] == "proj-1"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -710,3 +937,101 @@ class TestCollectorEngine:
 
         # Should not raise — errors captured in inventory
         assert isinstance(inventory, ResourceInventory)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# A failed read must be recorded as a coverage gap (never a silent "no findings")
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestFailuresAreRecordedAsCoverageGaps:
+    def test_service_usage_failure_blinds_the_scan_and_is_recorded(self):
+        from gcp_abuse_scanner.collectors.service_usage import ServiceUsageCollector
+
+        inv = ResourceInventory(project_ids=["proj-1"])
+        with patch("gcp_abuse_scanner.collectors.service_usage.service_usage_v1") as su:
+            su.ServiceUsageClient.return_value.list_services.side_effect = RuntimeError(
+                "HTTP 403: permission denied"
+            )
+            ServiceUsageCollector(_make_auth()).collect(inv, ["proj-1"])
+
+        assert inv.enabled_apis == []
+        assert inv.inaccessible_projects == ["proj-1"]
+        assert "serviceusage.googleapis.com" in inv.skipped_apis["proj-1"]
+
+    def test_org_policy_unreadable_is_a_gap_not_a_not_configured_policy(self):
+        """403 on a policy read must not become 'the constraint is not enforced'."""
+        from gcp_abuse_scanner.collectors.org_policy import OrgPolicyCollector
+
+        inv = _inventory_with_apis("orgpolicy.googleapis.com")
+        with patch("googleapiclient.discovery.build") as mock_build:
+            client = MagicMock()
+            mock_build.return_value = client
+            client.projects().policies().get().execute.side_effect = RuntimeError("HTTP 403")
+            OrgPolicyCollector(_make_auth()).collect(inv, ["proj-1"])
+
+        assert "orgpolicy.googleapis.com" in inv.skipped_apis["proj-1"]
+        assert inv.org_policies == []  # nothing recorded as "not configured"
+
+    def test_org_policy_404_still_means_not_configured(self):
+        from gcp_abuse_scanner.collectors.org_policy import OrgPolicyCollector
+
+        inv = _inventory_with_apis("orgpolicy.googleapis.com")
+        with patch("googleapiclient.discovery.build") as mock_build:
+            client = MagicMock()
+            mock_build.return_value = client
+            client.projects().policies().get().execute.side_effect = RuntimeError("HTTP 404")
+            OrgPolicyCollector(_make_auth()).collect(inv, ["proj-1"])
+
+        assert inv.skipped_apis == {}
+        assert inv.org_policies and all(p.policy == {} for p in inv.org_policies)
+
+    def test_org_policy_org_level_failure_is_recorded_as_a_collector_error(self):
+        from gcp_abuse_scanner.collectors.org_policy import OrgPolicyCollector
+
+        inv = _inventory_with_apis("orgpolicy.googleapis.com")
+        with patch("googleapiclient.discovery.build") as mock_build:
+            client = MagicMock()
+            mock_build.return_value = client
+            client.organizations().policies().get().execute.side_effect = RuntimeError(
+                "transport timeout after 30s"
+            )
+            OrgPolicyCollector(_make_auth()).collect(inv, ["proj-1"], organization_id="123")
+
+        errors = [e for e in inv.collector_errors if e["collector"] == "org_policy"]
+        assert errors and "organizations/123" in errors[0]["error"]
+
+    def test_quota_failure_is_recorded_as_a_skipped_api(self):
+        from gcp_abuse_scanner.collectors.quota import QuotaCollector
+
+        inv = _inventory_with_apis("serviceusage.googleapis.com", "aiplatform.googleapis.com")
+        with patch("googleapiclient.discovery.build") as mock_build:
+            client = MagicMock()
+            mock_build.return_value = client
+            client.services().consumerQuotaMetrics().list().execute.side_effect = RuntimeError(
+                "transport timeout after 30s"
+            )
+            QuotaCollector(_make_auth()).collect(inv, ["proj-1"])
+
+        skipped = inv.skipped_apis["proj-1"]
+        assert any(
+            "serviceusage.googleapis.com" in s or "aiplatform.googleapis.com" in s for s in skipped
+        )
+
+    def test_billing_info_failure_is_recorded_as_a_skipped_api(self):
+        from gcp_abuse_scanner.collectors.billing import BillingCollector
+
+        inv = _inventory_with_apis("cloudbilling.googleapis.com", "billingbudgets.googleapis.com")
+
+        def _build(api, version, **kwargs):
+            client = MagicMock()
+            if api == "cloudbilling":
+                client.projects().getBillingInfo().execute.side_effect = RuntimeError(
+                    "HTTP 403: permission denied"
+                )
+            return client
+
+        with patch("googleapiclient.discovery.build", side_effect=_build):
+            BillingCollector(_make_auth()).collect(inv, ["proj-1"])
+
+        assert "cloudbilling.googleapis.com" in inv.skipped_apis["proj-1"]

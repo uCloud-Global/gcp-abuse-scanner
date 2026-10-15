@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from gcp_abuse_scanner.collectors.base import BaseCollector, _fmt_exc
+from gcp_abuse_scanner.collectors.base import BaseCollector
 from gcp_abuse_scanner.models.inventory import ResourceInventory, VertexAIEndpoint
 
 if TYPE_CHECKING:
@@ -42,21 +42,13 @@ class VertexAICollector(BaseCollector):
         project_ids: list[str],
         organization_id: str | None = None,
     ) -> None:
-        creds = self._auth.get_credentials()
-
-        try:
-            import googleapiclient.discovery
-
-            aiplatform = googleapiclient.discovery.build("aiplatform", "v1", credentials=creds)
-        except Exception as exc:
-            logger.error("Failed to build Vertex AI client: %s", _fmt_exc(exc))
+        aiplatform = self.build_client(inventory, "aiplatform", "v1")
+        if aiplatform is None:
             return
 
         for project_id in project_ids:
             if not self.is_api_enabled(inventory, project_id):
-                inventory.skipped_apis.setdefault(project_id, []).append(
-                    "aiplatform.googleapis.com"
-                )
+                self.record_skipped_api(inventory, project_id, "aiplatform.googleapis.com")
                 continue
             for region in _VERTEX_REGIONS:
                 try:

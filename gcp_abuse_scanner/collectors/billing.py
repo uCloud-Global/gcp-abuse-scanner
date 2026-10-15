@@ -24,17 +24,9 @@ class BillingCollector(BaseCollector):
         project_ids: list[str],
         organization_id: str | None = None,
     ) -> None:
-        creds = self._auth.get_credentials()
-
-        try:
-            import googleapiclient.discovery
-
-            billing = googleapiclient.discovery.build("cloudbilling", "v1", credentials=creds)
-            budget_client = googleapiclient.discovery.build(
-                "billingbudgets", "v1", credentials=creds
-            )
-        except Exception as exc:
-            logger.error("Failed to build Billing clients: %s", _fmt_exc(exc))
+        billing = self.build_client(inventory, "cloudbilling", "v1")
+        budget_client = self.build_client(inventory, "billingbudgets", "v1")
+        if billing is None or budget_client is None:
             return
 
         # Collect billing account info per project
@@ -56,7 +48,10 @@ class BillingCollector(BaseCollector):
                             ProjectInfo(project_id=project_id, billing_account_id=ba_id)
                         )
             except Exception as exc:
-                logger.warning("Billing info failed for %s: %s", project_id, _fmt_exc(exc))
+                fmt = _fmt_exc(exc)
+                logger.warning("Billing info failed for %s: %s", project_id, fmt)
+                # No billing account for this project → no budget checks for it either.
+                self.record_skipped_api(inventory, project_id, "cloudbilling.googleapis.com", fmt)
 
         # Collect budgets for each billing account
         for ba_id in billing_accounts:
@@ -85,6 +80,13 @@ class BillingCollector(BaseCollector):
                         .list_next(previous_request=request, previous_response=response)
                     )
             except Exception as exc:
-                logger.warning(
-                    "Budget collection failed for billing account %s: %s", ba_id, _fmt_exc(exc)
+                fmt = _fmt_exc(exc)
+                logger.warning("Budget collection failed for billing account %s: %s", ba_id, fmt)
+                # The API is commonly disabled (billingbudgets.googleapis.com) or the identity
+                # lacks roles/billing.viewer. Either way we read nothing, so the budget checks
+                # must not report "no budget" — record the gap for the coverage report.
+                if ba_id not in inventory.budgets_unreadable:
+                    inventory.budgets_unreadable.append(ba_id)
+                self.record_collector_error(
+                    inventory, None, f"budgets unreadable for billing account {ba_id}: {fmt}"
                 )

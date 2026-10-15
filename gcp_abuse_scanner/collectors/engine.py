@@ -35,10 +35,18 @@ class CollectorEngine:
         auth_manager: AuthManager,
         max_workers: int = _MAX_WORKERS,
         cache: InventoryCache | None = None,
+        timeout: float | None = None,
+        transport: str | None = None,
     ) -> None:
         self._auth = auth_manager
         self._max_workers = max_workers
         self._cache = cache
+        self._timeout = timeout
+        self._transport = transport
+
+    def _new_collector(self, collector_cls: type[BaseCollector]) -> BaseCollector:
+        """Instantiate a collector with the engine's transport settings."""
+        return collector_cls(self._auth, timeout=self._timeout, transport=self._transport)
 
     def collect(
         self,
@@ -73,7 +81,7 @@ class CollectorEngine:
 
         # ── Phase 1: must run first (no API-enabled dependency) ──────────────
         priority_collectors: list[BaseCollector] = [
-            ServiceUsageCollector(self._auth),
+            self._new_collector(ServiceUsageCollector),
         ]
         for collector in priority_collectors:
             try:
@@ -85,17 +93,17 @@ class CollectorEngine:
 
         # ── Phase 2: concurrent collectors ───────────────────────────────────
         concurrent_collectors: list[BaseCollector] = [
-            IAMCollector(self._auth),
-            ComputeCollector(self._auth),
-            NetworkCollector(self._auth),
-            APIKeysCollector(self._auth),
-            BillingCollector(self._auth),
-            GKECollector(self._auth),
-            CloudRunCollector(self._auth),
-            VertexAICollector(self._auth),
-            OrgPolicyCollector(self._auth),
-            RecommenderCollector(self._auth),
-            QuotaCollector(self._auth),
+            self._new_collector(IAMCollector),
+            self._new_collector(ComputeCollector),
+            self._new_collector(NetworkCollector),
+            self._new_collector(APIKeysCollector),
+            self._new_collector(BillingCollector),
+            self._new_collector(GKECollector),
+            self._new_collector(CloudRunCollector),
+            self._new_collector(VertexAICollector),
+            self._new_collector(OrgPolicyCollector),
+            self._new_collector(RecommenderCollector),
+            self._new_collector(QuotaCollector),
         ]
 
         with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
