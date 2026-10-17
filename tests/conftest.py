@@ -41,6 +41,7 @@ def make_finding():
         priority_rank: int = 1,
         suppressed: bool = False,
         project_id: str = "proj-1",
+        evidence: dict | None = None,
     ) -> Finding:
         return Finding(
             finding_id=f"{check_id}-{project_id}-abc",
@@ -59,7 +60,7 @@ def make_finding():
                 project_id=project_id,
                 region="us-central1-a",
             ),
-            evidence={"instance_name": "vm-1"},
+            evidence=evidence or {"instance_name": "vm-1"},
             description="Test description.",
             impact="Test impact.",
             remediation=Remediation(

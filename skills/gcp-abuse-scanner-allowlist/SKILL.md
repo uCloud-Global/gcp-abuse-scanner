@@ -75,8 +75,9 @@ skipped, and both distort the result. Suppress those four during the pre-transfe
 then re-scan **without** the allowlist after the transfer to verify the alarm package is deployed.
 Rationale in [`docs/risk-model.md`](../../docs/risk-model.md) §5.
 
-Remember that a suppression changes the SOP risk level: a suppressed finding does not count toward
-the level. Never use the allowlist to reach level 1.
+Remember that a suppression never lowers the SOP risk level: the level is computed from every
+finding, suppressed or not, so the allowlist cannot reach level 1. Never use it to make a report
+look better.
 
 ## Auditing an existing allowlist
 

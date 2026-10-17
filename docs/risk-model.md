@@ -37,12 +37,13 @@ jq '.risk_assessment' gcp-scan-<id>.json
 
 ## 1. Level mapping
 
-The level is derived from **active (non-suppressed) findings only**, highest rule wins:
+The level is derived from **every finding, suppressed or not** (suppression never lowers it —
+see §5), highest rule wins:
 
 | Level | Label | Rule | Rationale |
 |---|---|---|---|
-| **4** | CRITICAL | Any active finding whose `check_id` is in `LEVEL_4_CHECKS` | Unrestricted access to Gemini from an API key, or access opened to the internet. Exploitable as-is, with no further prerequisite. |
-| **3** | HIGH | Any other active CRITICAL finding, and no level-4 finding | Includes the identity gaps: a personal account with Owner/Editor (`CM-046`), an open admin/database port (`CM-004`, `CM-008`), `allUsers` bindings, permissive egress. |
+| **4** | CRITICAL | Any finding whose `check_id` is in `LEVEL_4_CHECKS` | Unrestricted access to Gemini from an API key, or access opened to the internet. Exploitable as-is, with no further prerequisite. |
+| **3** | HIGH | Any other CRITICAL finding, and no level-4 finding | Includes the identity gaps: a personal account with Owner/Editor (`CM-046`), an open admin/database port (`CM-004`, `CM-008`), `allUsers` bindings, permissive egress. |
 | **2** | MEDIUM | Only HIGH findings (no CRITICAL) | Real exposure, but not exploitable without an additional step (a credential, a reachable workload). |
 | **1** | LOW | Only MEDIUM/LOW/INFO findings **and** complete coverage | Nothing that blocks the assessment. See the gate in section 2. |
 
@@ -52,7 +53,7 @@ inferred:
 | Check | Why level 4 |
 |---|---|
 | `GEM-001` | API key with no API restrictions |
-| `GEM-002` | API key with no application restrictions (referrer / IP) |
+| `GEM-002` | API key with no application restrictions (referrer / IP) — counts only when the key can reach the Gemini API: no API restriction at all, or `generativelanguage.googleapis.com` among its targets. A Maps-only key without referrer restrictions cannot call Gemini, so it reads as level 3. |
 | `GEM-006` | API key targeting the Gemini API with no referrer restriction |
 | `CM-043` | IAM binding grants access to `allUsers` / `allAuthenticatedUsers` |
 | `GEM-021` | Vertex AI role granted to `allUsers` / `allAuthenticatedUsers` |
@@ -111,9 +112,9 @@ on its own, and never compare two scans taken over different scopes.
 - **The posture score** (0–100) is a progress metric weighted by severity, normalized by project
   count. It is not comparable across scans of different sizes and is never used to derive the
   level.
-- **Suppressed findings do not count.** A suppressed `GEM-001` is invisible to the level. That is
-  the point of the allowlist — and the reason a suppression must be an accepted risk with a dated
-  reason, never a way to make a report look better.
+- **Suppressed findings still count.** A suppressed `GEM-001` still reads as level 4: an allowlist
+  is a record of accepted risk, not a way to make a report look better (§5). Suppression only
+  shapes the report — counts, penalty and ranking — never the level.
 - **Level 3 does not require a CRITICAL to be an identity problem.** The SOP wording "no 2SV, no
   Cloud Identity" is not directly observable by a read-only scanner (2SV lives in Workspace/Cloud
   Identity admin, outside the scanned APIs). `CM-046` is the scanner's proxy for it: a personal
@@ -131,8 +132,8 @@ keys" is indistinguishable from "there were no issues with the API keys".
 
 Rule:
 
-> **If any part of the API keys, IAM or network coverage is missing, the assessment is
-> undetermined and can never be approved automatically — regardless of the level.**
+> **If any part of the API keys, IAM, network, compute or quota coverage is missing, the
+> assessment is undetermined and can never be approved automatically — regardless of the level.**
 
 The gate is implemented as `coverage_complete` + `auto_approval_eligible`, and it is evaluated
 independently of the level (a level-1 scan with a gap is *not* approvable):
@@ -151,7 +152,13 @@ independently of the level (a level-1 scan with a gap is *not* approvable):
 | `api_keys` | `apikeys.googleapis.com` | `api_keys` | GEM-001…GEM-006, GEM-010 |
 | `iam` | `iam.googleapis.com`, `cloudresourcemanager.googleapis.com` | `iam` | CM-040…CM-046, GEM-020…GEM-023, CMN-004 |
 | `network` | `compute.googleapis.com` | `network` | CM-003, CM-004, CM-008, CM-050 |
+| `compute` | — (collector and checks only) | `compute` | CM-001, CM-005, CM-006, CM-007, CM-009, CMN-003 |
+| `quota` | `serviceusage.googleapis.com` | `quota` | GEM-040, GEM-041 |
 | `projects` | — | — | Any project in `coverage.inaccessible_project_ids`: every check is unevaluated there |
+
+`compute.googleapis.com` appears only in the `network` row on purpose: a project with that API
+disabled gets **one** gap (the compute collector and the network collector both lose it), not one
+gap per domain.
 
 A gap is recorded when any of these holds, per domain:
 
@@ -163,7 +170,7 @@ A gap is recorded when any of these holds, per domain:
 
 Gaps outside these domains (GKE, Cloud Run, Recommender, Vertex AI, budgeting) do **not** block
 approval — they are visible in `coverage` for the reader, but the SOP's gate is scoped to API
-keys, IAM and network.
+keys, IAM, network, compute and quota.
 
 Budgets deserve a note of their own: when the Cloud Billing Budget API is disabled (or the identity
 lacks `roles/billing.viewer`), `coverage.unreadable_budget_accounts` lists the accounts that could
@@ -238,6 +245,16 @@ Decision table:
 | `false` | 3 | Remediate the CRITICAL findings (open ports, identity gaps, public bindings) before handover. |
 | `false` | 4 | Stop. Unrestricted Gemini key or public access. No transfer without fixing this. |
 
+**Combining the scanner with the manual evidence.** 2SV, Cloud Identity, M365 access and
+consumption peaks live outside what a read-only scanner sees, so the SOP's manual evidence is
+merged with this report by taking the higher of the two:
+
+```
+final level = max(scanner level, manual evidence level)
+```
+
+`auto_approval_eligible` covers scanner coverage only — the scanner never approves on its own.
+
 Process exit codes are unchanged by the risk model (`0` no active CRITICAL, `2` at least one
 CRITICAL, `1`/`2` for usage and scope errors — see `AGENTS.md`). Gate on
 `risk_assessment.auto_approval_eligible` in CI instead of re-deriving the rule from severities.
@@ -246,13 +263,17 @@ CRITICAL, `1`/`2` for usage and scope errors — see `AGENTS.md`). Gate on
 
 ## 5. Suppression is not neutral
 
-Suppressions change the level: a suppressed finding is not counted by any rule in section 1. Two
+Suppression never lowers the level: `assess_risk` computes the level from **every** finding,
+suppressed or not, so an allowlist cannot turn an open Gemini key or an unremediated `CMN-001`
+into a level 1. Suppression only shapes the report — counts, penalty and ranking. Two
 consequences worth stating out loud:
 
 - The **pre-transfer allowlist** (`examples/allowlist-pre-transfer.yaml`) suppresses exactly the
   four budget checks, because before the billing transfer the budgets live on the client's billing
   account — there is nothing to observe, and an absent budget is not a finding the client can act
-  on. The file documents its own expiry: **remove it after the transfer** and re-scan, so the alarm
-  package deployed during the transfer is actually verified.
+  on. Since those findings are still counted, that scan reads as **level 2** and is never
+  auto-approved: it goes through human review (§4). The file documents its own expiry: **remove it
+  after the transfer** and re-scan, so the alarm package deployed during the transfer is actually
+  verified.
 - Any suppression must carry a dated reason and be reviewed (`docs/allowlist.md`). The allowlist is
   a record of accepted risk, never a way to reach level 1.

@@ -18,6 +18,10 @@
 # Once the project is on the uCloud billing account, re-scan WITHOUT this
 # allowlist to verify that the alarm package is actually deployed and firing.
 #
+# Expectation: a suppressed finding still counts for the SOP risk level, so this
+# scan reads as level 2 (not 1) and is never auto-approved — human review with a
+# written note, see docs/risk-model.md §4 and §5.
+#
 # Review: see docs/risk-model.md (§5) and docs/allowlist.md
 #
 # Format note: top-level list — accepted by every released version. The

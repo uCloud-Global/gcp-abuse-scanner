@@ -1,6 +1,6 @@
 # Test coverage — state, gap analysis and plan
 
-Snapshot: **2026-10-15 · 94.2 %** (3138 statements, 182 uncovered) · 450 tests · Python 3.11 / 3.12.
+Snapshot: **2026-10-16 · 94.2 %** (3148 statements, 183 uncovered) · 457 tests · Python 3.11 / 3.12.
 
 This document is the plan for closing the remaining gap, in order of value per hour. It is a
 checklist, not an aspiration: every item names the file, the exact number of uncovered statements

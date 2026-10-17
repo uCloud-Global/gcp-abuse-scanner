@@ -72,14 +72,23 @@ class TestRiskLevelMapping:
         assert risk.coverage_complete is True
         assert risk.auto_approval_eligible is True
 
-    def test_suppressed_findings_do_not_count(self, make_finding) -> None:
+    def test_suppressed_findings_do_not_lower_the_level(self, make_finding) -> None:
         findings = [
             make_finding(check_id="GEM-001", severity=Severity.CRITICAL, suppressed=True),
             make_finding(check_id="CM-004", severity=Severity.CRITICAL, suppressed=True),
         ]
         risk = assess_risk(findings, _coverage())
-        assert risk.level == 1
-        assert risk.auto_approval_eligible is True
+        assert risk.level == 4
+        assert risk.auto_approval_eligible is False
+        assert "2 finding(s) suppressed by allowlist" in risk.rationale
+        assert "suppression does not lower the level" in risk.rationale
+
+    def test_suppressed_high_finding_still_blocks_auto_approval(self, make_finding) -> None:
+        """Pre-transfer allowlist case: a suppressed CMN-001 reads as level 2, not 1."""
+        findings = [make_finding(check_id="CMN-001", severity=Severity.HIGH, suppressed=True)]
+        risk = assess_risk(findings, _coverage())
+        assert risk.level == 2
+        assert risk.auto_approval_eligible is False
 
     def test_triggers_are_capped_and_check_ids_are_unique(self, make_finding) -> None:
         findings = [make_finding(check_id="GEM-001", severity=Severity.CRITICAL) for _ in range(25)]
@@ -118,8 +127,27 @@ class TestCoverageGate:
             [],
             _coverage(skipped_apis_by_project={"proj-1": ["compute.googleapis.com"]}),
         )
+        # one gap, not two: the compute domain watches the collector, not the API
         assert [g.domain for g in risk.coverage_gaps] == ["network"]
         assert risk.coverage_gaps[0].missing_apis == ["compute.googleapis.com"]
+
+    def test_compute_collector_error_is_a_gap(self) -> None:
+        risk = assess_risk(
+            [],
+            _coverage(collector_errors=[{"collector": "compute", "error": "HTTP 403"}]),
+        )
+        assert [g.domain for g in risk.coverage_gaps] == ["compute"]
+        assert risk.coverage_gaps[0].collectors == ["compute"]
+        assert risk.auto_approval_eligible is False
+
+    def test_quota_collector_error_is_a_gap(self) -> None:
+        risk = assess_risk(
+            [],
+            _coverage(collector_errors=[{"collector": "quota", "error": "HTTP 403"}]),
+        )
+        assert [g.domain for g in risk.coverage_gaps] == ["quota"]
+        assert risk.coverage_gaps[0].affected_checks == []
+        assert risk.auto_approval_eligible is False
 
     def test_not_applicable_sensitive_check_is_a_gap(self) -> None:
         coverage = _coverage(
@@ -189,3 +217,40 @@ class TestCoverageGate:
         assert risk.level == 1
         assert risk.auto_approval_eligible is True
         assert risk.auto_approval_blockers == []
+
+
+class TestGEM002Reachability:
+    """GEM-002 only means level 4 when the key can actually call the Gemini API."""
+
+    @staticmethod
+    def _risk(make_finding, restrictions):
+        return assess_risk(
+            [
+                make_finding(
+                    check_id="GEM-002",
+                    severity=Severity.CRITICAL,
+                    evidence={"restrictions": restrictions},
+                )
+            ],
+            _coverage(),
+        )
+
+    def test_no_api_targets_counts_as_level_4(self, make_finding) -> None:
+        assert self._risk(make_finding, {}).level == 4
+
+    def test_missing_restrictions_evidence_counts_as_level_4(self, make_finding) -> None:
+        risk = assess_risk(
+            [make_finding(check_id="GEM-002", severity=Severity.CRITICAL)],
+            _coverage(),
+        )
+        assert risk.level == 4
+
+    def test_gemini_target_counts_as_level_4(self, make_finding) -> None:
+        restrictions = {"apiTargets": [{"service": "generativelanguage.googleapis.com"}]}
+        assert self._risk(make_finding, restrictions).level == 4
+
+    def test_maps_only_key_drops_to_level_3(self, make_finding) -> None:
+        restrictions = {"apiTargets": [{"service": "maps.googleapis.com"}]}
+        risk = self._risk(make_finding, restrictions)
+        assert risk.level == 3
+        assert risk.auto_approval_eligible is False

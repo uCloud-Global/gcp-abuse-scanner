@@ -6,15 +6,24 @@ decides with levels 1 to 4. This module is the only translation rule, so two
 analysts (or two runs) reading the same report always reach the same level:
 
     4  Unrestricted access to Gemini from an API key, or public access
-       (LEVEL_4_CHECKS) — unacceptable, regardless of anything else.
+       (LEVEL_4_CHECKS) — unacceptable, regardless of anything else. A
+       GEM-002 (no application restriction) counts only when the key can
+       actually reach the Gemini API: no API restriction at all, or
+       generativelanguage.googleapis.com among its targets. A Maps-only key
+       without referrer restrictions cannot call Gemini.
     3  Any other CRITICAL finding (identity gaps included: a personal account
        with Owner/Editor is a CRITICAL finding).
     2  HIGH findings and no CRITICAL.
     1  Only MEDIUM/LOW/INFO findings.
 
+Suppression never lowers the level: `assess_risk` computes it from every
+finding, suppressed or not, so an allowlist cannot turn an open Gemini key
+into an auto-approved level 1 (docs/risk-model.md §5).
+
 Coverage is a separate gate, not a level: a scan that could not read API keys,
-IAM or network leaves the assessment undetermined, so it can never be approved
-automatically even when it reports no findings. See docs/risk-model.md.
+IAM, network, compute or quota leaves the assessment undetermined, so it can
+never be approved automatically even when it reports no findings.
+See docs/risk-model.md.
 """
 
 from __future__ import annotations
@@ -48,6 +57,30 @@ LEVEL_4_CHECKS: frozenset[str] = frozenset(
         "GEM-021",  # Vertex AI role granted to allUsers/allAuthenticatedUsers
     }
 )
+
+
+def _reaches_gemini_api(finding: Finding) -> bool:
+    """
+    True when the key behind a GEM-002 finding can actually call the Gemini API.
+
+    GEM-002 fires on any key without application (referrer/IP) restrictions, but a key
+    restricted to another API — Maps Platform, for instance — cannot reach
+    generativelanguage.googleapis.com, so it must not trigger the level-4 "no transfer"
+    verdict. Counted at level 4 when there is no API restriction at all (no
+    `apiTargets`), or when the Generative Language API is one of the targets.
+    Unrecognised evidence shapes count (fail-safe: the uncertain case stays severe).
+    """
+    restrictions = finding.evidence.get("restrictions")
+    if not restrictions or not isinstance(restrictions, dict):
+        return True
+    targets = restrictions.get("apiTargets") or []
+    if not targets:
+        return True
+    return any(
+        isinstance(target, dict) and "generativelanguage" in str(target.get("service", ""))
+        for target in targets
+    )
+
 
 LEVEL_LABELS: dict[int, str] = {
     1: "LOW",
@@ -114,6 +147,24 @@ _SENSITIVE_DOMAINS: tuple[_Domain, ...] = (
         collectors=("network",),
         checks=("CM-003", "CM-004", "CM-008", "CM-050"),
     ),
+    # Compute is the crypto-mining surface: a failed/skipped compute collection
+    # removes CM-001/CM-005/CM-006/CM-007/CM-009/CMN-003 from the assessment
+    # (the gate used to watch only api_keys, iam and network).
+    # apis is empty on purpose: compute.googleapis.com already gates the network
+    # domain above, and listing it twice reports one skipped API as two gaps.
+    _Domain(
+        name="compute",
+        apis=(),
+        collectors=("compute",),
+        checks=("CM-001", "CM-005", "CM-006", "CM-007", "CM-009", "CMN-003"),
+    ),
+    # Quotas are the cost-abuse control (GEM-040/041); they read serviceusage.
+    _Domain(
+        name="quota",
+        apis=("serviceusage.googleapis.com",),
+        collectors=("quota",),
+        checks=("GEM-040", "GEM-041"),
+    ),
 )
 
 
@@ -121,9 +172,20 @@ def assess_risk(
     findings: list[Finding],
     coverage: CoverageReport,
 ) -> RiskAssessment:
-    """Return the SOP risk level plus the coverage gate for a completed scan."""
-    active = [f for f in findings if not f.suppressed]
-    level, triggers, rationale = _risk_level(active)
+    """Return the SOP risk level plus the coverage gate for a completed scan.
+
+    The level is computed from *all* findings — suppressed ones included — because an
+    allowlist must never lower it (a suppressed GEM-001 would otherwise read as level 1
+    and auto-approve an open Gemini key). Suppression only shapes the report: counts,
+    penalty, ranking.
+    """
+    suppressed_count = sum(1 for f in findings if f.suppressed)
+    level, triggers, rationale = _risk_level(findings)
+    if suppressed_count:
+        rationale += (
+            f" {suppressed_count} finding(s) suppressed by allowlist — suppression does not "
+            "lower the level (docs/risk-model.md §5)."
+        )
     gaps = _coverage_gaps(coverage)
 
     coverage_complete = not gaps
@@ -154,20 +216,25 @@ def assess_risk(
 
 
 def _risk_level(
-    active_findings: list[Finding],
+    all_findings: list[Finding],
 ) -> tuple[int, list[RiskTrigger], str]:
-    level_4 = [f for f in active_findings if f.check_id in LEVEL_4_CHECKS]
+    level_4 = [
+        f
+        for f in all_findings
+        if f.check_id in LEVEL_4_CHECKS and (f.check_id != "GEM-002" or _reaches_gemini_api(f))
+    ]
     if level_4:
         return (
             4,
             [_trigger(f, "level_4_check") for f in level_4[:_MAX_TRIGGERS]],
             (
                 f"{len(level_4)} finding(s) of the level-4 class — unrestricted Gemini API "
-                f"key or public access ({_count_by_check(level_4)})."
+                f"key or public access ({_count_by_check(level_4)}). GEM-002 counts only "
+                "when the key can reach the Gemini API."
             ),
         )
 
-    critical = [f for f in active_findings if f.severity == Severity.CRITICAL]
+    critical = [f for f in all_findings if f.severity == Severity.CRITICAL]
     if critical:
         return (
             3,
@@ -178,9 +245,9 @@ def _risk_level(
             ),
         )
 
-    high = [f for f in active_findings if f.severity == Severity.HIGH]
+    high = [f for f in all_findings if f.severity == Severity.HIGH]
     if high:
-        others = len(active_findings) - len(high)
+        others = len(all_findings) - len(high)
         detail = f"; {others} MEDIUM/LOW also present" if others else ""
         return (
             2,
@@ -194,10 +261,7 @@ def _risk_level(
     return (
         1,
         [],
-        (
-            f"No CRITICAL or HIGH findings — {len(active_findings)} MEDIUM/LOW/INFO "
-            "finding(s) only."
-        ),
+        (f"No CRITICAL or HIGH findings — {len(all_findings)} MEDIUM/LOW/INFO " "finding(s) only."),
     )
 
 

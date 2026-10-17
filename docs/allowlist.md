@@ -1,6 +1,6 @@
 # Allowlist Reference
 
-The allowlist lets you suppress findings that are **known exceptions** or **accepted risks** — false positives that you've reviewed and decided not to fix. Suppressed findings still appear in reports (marked as suppressed) but don't affect the posture score or exit code.
+The allowlist lets you suppress findings that are **known exceptions** or **accepted risks** — false positives that you've reviewed and decided not to fix. Suppressed findings still appear in reports (marked as suppressed) but don't affect the posture score or exit code. They **do** count for the SOP risk level: suppression never lowers it, so an allowlist can't reach level 1 ([`risk-model.md`](risk-model.md) §5).
 
 ---
 
@@ -129,6 +129,11 @@ gcp-abuse-scanner scan --project CLIENT_PROJECT \
 
 **It expires with the transfer.** Re-run without the allowlist afterwards to verify that the alarm
 package actually got deployed. Full rationale in [`docs/risk-model.md`](risk-model.md) §5.
+
+**It does not buy auto-approval.** Suppressed findings still count for the risk level, so a scan
+run with this file reads as level 2 whenever a suppressed `CMN-001` (HIGH) is present and is never
+auto-approved — take it through human review ([`risk-model.md`](risk-model.md) §4) with a written
+note that the budgets were unobservable pre-transfer.
 
 ---
 

@@ -184,14 +184,15 @@ human review:
 
 | Level | Rule |
 |---|---|
-| 4 | Any active finding in `LEVEL_4_CHECKS` (GEM-001/002/006, CM-043, GEM-021) |
+| 4 | Any finding in `LEVEL_4_CHECKS` (GEM-001/002/006, CM-043, GEM-021), suppressed or not |
 | 3 | Any other CRITICAL |
 | 2 | HIGH findings, no CRITICAL |
 | 1 | Only MEDIUM/LOW/INFO |
 
 Independently of the level, the **coverage gate** inspects `coverage` and produces
-`coverage_gaps[]` when an API keys, IAM or network input could not be read (API not enabled or not
-readable, collector error, sensitive check NOT_APPLICABLE or errored, inaccessible project). Any gap
+`coverage_gaps[]` when an API keys, IAM, network, compute or quota input could not be read (API not
+enabled or not readable, collector error, sensitive check NOT_APPLICABLE or errored, inaccessible
+project). Any gap
 sets `coverage_complete: false` and `auto_approval_eligible: false`: a scan that could not look
 cannot approve. Collectors feed this by recording skips via
 `BaseCollector.record_skipped_api()` / `record_collector_error()` — never by staying silent.

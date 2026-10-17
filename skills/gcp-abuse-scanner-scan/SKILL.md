@@ -65,8 +65,9 @@ jq '.risk_assessment | {level, label, auto_approval_eligible, blockers: .auto_ap
 ```
 
 `auto_approval_eligible: false` means either the level is ≥2 or a sensitive domain (API keys, IAM,
-network) could not be read. A scan that exits `0` with an incomplete `risk_assessment` is **not** a
-clean scan — it is an undetermined one. See [`docs/risk-model.md`](../../docs/risk-model.md).
+network, compute, quota) could not be read. A scan that exits `0` with an incomplete
+`risk_assessment` is **not** a clean scan — it is an undetermined one. See
+[`docs/risk-model.md`](../../docs/risk-model.md).
 
 ## Common recipes
 
